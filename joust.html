@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sky Duel Prototype</title>
+<style>
+  body { margin: 0; background: #000; color: white; font: 16px system-ui; }
+  canvas { display: block; margin: 24px auto; background: #000; }
+  p { text-align: center; }
+</style>
+<canvas id="game" width="1100" height="620"></canvas>
+<p>← → to steer · ↑ or Space to flap</p>
+<script>
+const canvas = document.querySelector('#game');
+const ctx = canvas.getContext('2d');
+const spriteSheet = new Image();
+spriteSheet.src = 'joust-spritesheet.png';
+const gravity = 0.15;
+const flapLift = 0.28;
+const maxVerticalSpeed = 3.4;
+const steeringAcceleration = 0.22;
+const maxHorizontalSpeed = 2.8;
+// Tan platform collision bounds mapped from the background crop to canvas pixels.
+const platforms = [
+  { x: 0,   y: 97,  bottom: 119, width: 120 }, { x: 924, y: 97,  bottom: 122, width: 176 },
+  { x: 310, y: 131, bottom: 160, width: 328 },
+  { x: 0,   y: 294, bottom: 319, width: 236 }, { x: 735, y: 269, bottom: 300, width: 217 },
+  { x: 938, y: 294, bottom: 319, width: 162 },
+  { x: 379, y: 366, bottom: 391, width: 240 },
+  { x: 185, y: 501, bottom: 590, width: 694 }
+];
+const riderHalfWidth = 23;
+const riderHalfHeight = 29;
+const riderSpriteWidth = 46;
+const riderSpriteHeight = 58;
+const playerStandFrames = [{ x: 247, y: 44, offsetY: 2 }];
+const playerWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 63 }));
+const playerFlightFrames = [247, 262].map(x => ({ x, y: 102, width: 14, height: 13, drawHeight: 43 }));
+const enemyWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 193 }));
+const enemyFlightFrames = [247, 262].map(x => ({ x, y: 214, width: 14, height: 14, drawHeight: 46 }));
+const loneBirdFrames = [247, 262].map(x => ({ x, y: 120, width: 14, height: 14 }));
+const loneBirdWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 140, width: 14, height: 18 }));
+const playerSpawnFrames = [323, 338, 353, 368, 383, 398]
+  .map(x => ({ x, y: 363, width: 14, height: 20 }));
+const riderlessFlightFrames = new Map();
+const player = {
+  x: 250, y: 344, vx: 0, vy: 0, onPlatform: false, facingLeft: false,
+  animationClock: 0, animBoost: 0, death: null, spawn: null
+};
+const enemy = {
+  x: 825, y: 344, vx: -1.5, vy: 0, onPlatform: false,
+  animationClock: 0, animBoost: 0, death: null
+};
+let score = 0, keys = {};
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'Space'].includes(e.code)) e.preventDefault();
+});
+addEventListener('keyup', e => keys[e.code] = false);
+function resetPlayer() {
+  const points = platforms.map(platform => ({
+    x: platform.x + platform.width / 2,
+    y: platform.y - riderHalfHeight - 1
+  }));
+  const safePoints = points.filter(point =>
+    Math.hypot(point.x - enemy.x, point.y - enemy.y) > 180);
+  const choices = safePoints.length ? safePoints : points;
+  const spawnPoint = choices[Math.floor(Math.random() * choices.length)];
+  player.x = spawnPoint.x; player.y = spawnPoint.y; player.vx = 0; player.vy = 0;
+  player.onPlatform = true; player.facingLeft = false; player.animBoost = 0; player.death = null;
+}
+function startDeath(rider) {
+  const direction = rider === player
+    ? (rider.facingLeft ? -1 : 1)
+    : (rider.vx < 0 ? -1 : 1);
+  const wasFlying = !rider.onPlatform;
+  const platform = rider.onPlatform && platforms.find(p =>
+    rider.x >= p.x && rider.x <= p.x + p.width &&
+    Math.abs(rider.y + riderHalfHeight - p.y) <= 3);
+  const wasWalking = Boolean(platform && (Math.abs(rider.vx) > 0.15 ||
+    (rider === player && (keys.ArrowLeft || keys.ArrowRight))));
+  rider.death = {
+    elapsed: 0, direction, phase: wasWalking ? 'walk' : 'fly',
+    wasFlying,
+    walkEdge: platform ? (direction < 0 ? platform.x - 25 : platform.x + platform.width + 25) : null,
+    birdX: rider.x, birdY: rider.y,
+    birdVX: direction * (wasWalking ? 1.4 : 2.8), birdVY: wasWalking ? 0 : -1.1,
+    riderX: rider.x, riderY: rider.y
+  };
+  rider.onPlatform = false;
+}
+function finishDeath(rider) {
+  rider.death = null;
+  if (rider === player) {
+    resetPlayer();
+    player.spawn = { elapsed: 0 };
+  } else {
+    enemy.x = 825; enemy.y = 344; enemy.vx = -1.5 - score * 0.1;
+    enemy.vy = 0; enemy.onPlatform = false; enemy.animBoost = 0;
+  }
+}
+function updateDeath(rider) {
+  const death = rider.death;
+  death.elapsed += 1 / 60;
+  death.birdX += death.birdVX;
+  if (death.phase === 'walk') {
+    const walkedOff = death.direction < 0
+      ? death.birdX <= death.walkEdge
+      : death.birdX >= death.walkEdge;
+    if (walkedOff) {
+      death.phase = 'fly';
+      death.birdVX = death.direction * 2.8;
+      death.birdVY = -1.1;
+    }
+  } else {
+    death.birdY += death.birdVY;
+    death.birdVY += 0.015;
+  }
+  const birdGone = death.birdX < -45 || death.birdX > canvas.width + 45 ||
+    death.birdY < -45 || death.birdY > canvas.height + 45;
+  if (death.elapsed >= 5.5 || (birdGone && death.elapsed >= 1.6)) finishDeath(rider);
+}
+function updateSpawn() {
+  player.spawn.elapsed += 1 / 60;
+  if (player.spawn.elapsed >= playerSpawnFrames.length / 7) player.spawn = null;
+}
+function bounceAnimation(rider) { rider.animBoost = Math.max(rider.animBoost, 2.8); }
+function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
+  rider.onPlatform = false;
+  const overlapsHorizontally = p =>
+    rider.x + riderHalfWidth > p.x && rider.x - riderHalfWidth < p.x + p.width;
+  const overlapsVertically = p =>
+    rider.y + riderHalfHeight > p.y && rider.y - riderHalfHeight < p.bottom;
+
+  if (checkSides && rider.vx > 0) {
+    const platform = platforms.find(p =>
+      previousX + riderHalfWidth <= p.x && rider.x + riderHalfWidth >= p.x &&
+      overlapsVertically(p)
+    );
+    if (platform) {
+      rider.x = platform.x - riderHalfWidth;
+      rider.vx = -Math.max(0.9, Math.min(2.2, Math.abs(rider.vx) * 0.7));
+      if (rider === player) rider.facingLeft = true;
+      bounceAnimation(rider);
+    }
+  } else if (checkSides && rider.vx < 0) {
+    const platform = platforms.find(p =>
+      previousX - riderHalfWidth >= p.x + p.width && rider.x - riderHalfWidth <= p.x + p.width &&
+      overlapsVertically(p)
+    );
+    if (platform) {
+      rider.x = platform.x + platform.width + riderHalfWidth;
+      rider.vx = Math.max(0.9, Math.min(2.2, Math.abs(rider.vx) * 0.7));
+      if (rider === player) rider.facingLeft = false;
+      bounceAnimation(rider);
+    }
+  }
+
+  if (rider.vy >= 0) {
+    const previousFeet = previousY + riderHalfHeight;
+    const feet = rider.y + riderHalfHeight;
+    const platform = platforms.find(p =>
+      previousFeet <= p.y && feet >= p.y && overlapsHorizontally(p)
+    );
+    if (platform) {
+      rider.y = platform.y - riderHalfHeight;
+      rider.vy = 0;
+      rider.onPlatform = true;
+    }
+  } else {
+    const previousHead = previousY - riderHalfHeight;
+    const head = rider.y - riderHalfHeight;
+    const platform = platforms.find(p =>
+      previousHead >= p.bottom && head <= p.bottom && overlapsHorizontally(p)
+    );
+    if (platform) {
+      rider.y = platform.bottom + riderHalfHeight;
+      rider.vy = Math.min(2.2, Math.max(0.9, Math.abs(rider.vy) * 0.5));
+      bounceAnimation(rider);
+    }
+  }
+}
+function updateAnimation(rider) {
+  rider.animationClock += (1000 / 60) * (1 + rider.animBoost);
+  rider.animBoost *= 0.95;
+  if (rider.animBoost < 0.01) rider.animBoost = 0;
+}
+function updatePlayer() {
+  if (keys.ArrowLeft) { player.vx -= steeringAcceleration; player.facingLeft = true; }
+  if (keys.ArrowRight) { player.vx += steeringAcceleration; player.facingLeft = false; }
+  if (keys.Space || keys.ArrowUp) player.vy -= flapLift;
+  player.vx *= 0.96;
+  player.vy += gravity;
+  player.vx = Math.max(-maxHorizontalSpeed, Math.min(maxHorizontalSpeed, player.vx));
+  player.vy = Math.max(-maxVerticalSpeed, Math.min(maxVerticalSpeed, player.vy));
+  const previousPlayerX = player.x, previousPlayerY = player.y;
+  player.x += player.vx; player.y += player.vy;
+  const playerWrapped = player.x < -riderHalfWidth || player.x > canvas.width + riderHalfWidth;
+  if (player.x < -riderHalfWidth) player.x = canvas.width + riderHalfWidth;
+  else if (player.x > canvas.width + riderHalfWidth) player.x = -riderHalfWidth;
+  collideWithPlatforms(player, previousPlayerX, previousPlayerY, !playerWrapped);
+  if (player.y > canvas.height - riderHalfHeight) {
+    player.y = canvas.height - riderHalfHeight; player.vy = -1.1;
+  }
+  if (player.y < riderHalfHeight) { player.y = riderHalfHeight; player.vy = 0; }
+  updateAnimation(player);
+}
+function updateEnemy() {
+  const previousEnemyX = enemy.x, previousEnemyY = enemy.y;
+  enemy.x += enemy.vx;
+  const enemyWrapped = enemy.x < -riderHalfWidth || enemy.x > canvas.width + riderHalfWidth;
+  if (enemy.x < -riderHalfWidth) enemy.x = canvas.width + riderHalfWidth;
+  else if (enemy.x > canvas.width + riderHalfWidth) enemy.x = -riderHalfWidth;
+  const enemyFlightHeight = 344 + Math.sin(Date.now() / 900) * 38;
+  enemy.vy += (enemyFlightHeight - enemy.y) * 0.001;
+  enemy.vy *= 0.96;
+  enemy.y += enemy.vy;
+  collideWithPlatforms(enemy, previousEnemyX, previousEnemyY, !enemyWrapped);
+  if (enemy.y > canvas.height - riderHalfHeight) {
+    enemy.y = canvas.height - riderHalfHeight; enemy.vy = -1.1;
+  }
+  if (enemy.y < riderHalfHeight) { enemy.y = riderHalfHeight; enemy.vy = 0; }
+  updateAnimation(enemy);
+}
+function update() {
+  const playerWasActive = !player.death;
+  const enemyWasActive = !enemy.death;
+  if (player.death) updateDeath(player);
+  else if (player.spawn) updateSpawn();
+  else updatePlayer();
+  if (enemy.death) updateDeath(enemy); else updateEnemy();
+  if (playerWasActive && enemyWasActive && !player.death && !player.spawn && !enemy.death) {
+    const close = Math.abs(player.x - enemy.x) < riderHalfWidth * 2 &&
+      Math.abs(player.y - enemy.y) < riderHalfHeight * 2;
+    if (close) {
+      if (player.y < enemy.y - 5) {
+        score++;
+        startDeath(enemy);
+      } else {
+        startDeath(player);
+      }
+    }
+  }
+}
+function drawAtlasSprite(frame, x, y, width, height, facingLeft = false, tint = 'none') {
+  if (!spriteSheet.complete || !spriteSheet.naturalWidth) return;
+  const sourceWidth = frame.width || 14;
+  const sourceHeight = frame.height || 20;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.filter = tint;
+  if (facingLeft) {
+    ctx.translate(x * 2, 0);
+    ctx.scale(-1, 1);
+  }
+  ctx.drawImage(spriteSheet, frame.x, frame.y, sourceWidth, sourceHeight,
+    x - width / 2, y - height / 2 + (frame.offsetY || 0), width, height);
+  ctx.restore();
+}
+function drawRider(rider, frames, facingLeft) {
+  const frame = frames[Math.floor(rider.animationClock / 180) % frames.length];
+  drawAtlasSprite(frame, rider.x, rider.y, riderSpriteWidth,
+    frame.drawHeight || riderSpriteHeight, facingLeft);
+}
+function drawDeathBird(rider, death, facingLeft) {
+  if (death.phase === 'walk') {
+    const frame = loneBirdWalkFrames[Math.floor(death.elapsed * 6) % loneBirdWalkFrames.length];
+    drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
+    return;
+  }
+  if (!death.wasFlying && death.elapsed < 0.25) {
+    const frame = loneBirdFrames[Math.floor(death.elapsed * 4) % loneBirdFrames.length];
+    drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
+    return;
+  }
+
+  const frames = rider === player ? playerFlightFrames : enemyFlightFrames;
+  const frame = frames[Math.floor(death.elapsed * 4) % frames.length];
+  const key = `${frame.x}:${frame.y}`;
+  let image = riderlessFlightFrames.get(key);
+  if (!image && spriteSheet.complete && spriteSheet.naturalWidth) {
+    const width = frame.width || 14;
+    const height = frame.height || 20;
+    image = document.createElement('canvas');
+    image.width = width;
+    image.height = height;
+    const imageCtx = image.getContext('2d');
+    imageCtx.drawImage(spriteSheet, frame.x, frame.y, width, height, 0, 0, width, height);
+    // Remove the rider and, for the enemy, the lance pixels above the bird.
+    if (rider === player) {
+      imageCtx.clearRect(2, 0, 9, 9);
+    } else {
+      imageCtx.clearRect(3, 0, 7, 7);
+      imageCtx.clearRect(7, 3, 7, 3);
+    }
+    riderlessFlightFrames.set(key, image);
+  }
+  if (!image) return;
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  if (facingLeft) {
+    ctx.translate(death.birdX * 2, 0);
+    ctx.scale(-1, 1);
+  }
+  ctx.drawImage(image, death.birdX - 25, death.birdY - 24, 50, 48);
+  ctx.restore();
+}
+function drawDeath(rider) {
+  const death = rider.death;
+  if (!death) return;
+  const birdGone = death.birdX < -45 || death.birdX > canvas.width + 45 ||
+    death.birdY < -45 || death.birdY > canvas.height + 45;
+  if (!birdGone) {
+    drawDeathBird(rider, death, death.direction < 0);
+  }
+  if (death.elapsed < 0.3) {
+    drawAtlasSprite({ x: 271, y: 286, width: 9, height: 7 },
+      death.riderX, death.riderY, 24, 20, false, 'hue-rotate(-120deg) saturate(1.4)');
+  } else if (death.elapsed < 0.78) {
+    drawAtlasSprite({ x: 247, y: 286, width: 8, height: 8 },
+      death.riderX, death.riderY, 30, 30, false, 'hue-rotate(70deg) saturate(1.2)');
+  } else if (death.elapsed < 1.425) {
+    drawAtlasSprite({ x: 255, y: 286, width: 8, height: 8 },
+      death.riderX, death.riderY, 36, 34, false, 'hue-rotate(70deg) saturate(1.2)');
+  }
+}
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // The sprite sheet's upper-left panel contains the arena backdrop and platforms.
+  if (spriteSheet.complete && spriteSheet.naturalWidth) {
+    ctx.drawImage(spriteSheet, 0, 42, 238, 198, 0, 0, canvas.width, canvas.height);
+  }
+  const playerWalking = keys.ArrowLeft || keys.ArrowRight || Math.abs(player.vx) > 0.15;
+  const playerFrames = !player.onPlatform ? playerFlightFrames
+    : playerWalking ? playerWalkFrames : playerStandFrames;
+  if (player.death) drawDeath(player);
+  else if (player.spawn) {
+    const frame = playerSpawnFrames[Math.min(playerSpawnFrames.length - 1,
+      Math.floor(player.spawn.elapsed * 7))];
+    drawAtlasSprite(frame, player.x, player.y, riderSpriteWidth, riderSpriteHeight);
+  } else drawRider(player, playerFrames, player.facingLeft);
+  if (enemy.death) drawDeath(enemy);
+  else drawRider(enemy, enemy.onPlatform ? enemyWalkFrames : enemyFlightFrames, enemy.vx < 0);
+  ctx.fillStyle = 'white'; ctx.fillText(`Score: ${score}`, 20, 28);
+}
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+loop();
+</script>
+</html>

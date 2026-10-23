@@ -274,7 +274,15 @@ function drawDeathBird(rider, death, facingLeft) {
     return;
   }
 
-  const frames = rider === player ? playerFlightFrames : enemyFlightFrames;
+  // The sheet includes a separate riderless blue flight animation. Use it
+  // directly so the player's head and upper body aren't erased with the rider.
+  if (rider === player) {
+    const frame = loneBirdFrames[Math.floor(death.elapsed * 4) % loneBirdFrames.length];
+    drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
+    return;
+  }
+
+  const frames = enemyFlightFrames;
   const frame = frames[Math.floor(death.elapsed * 4) % frames.length];
   const key = `${frame.x}:${frame.y}`;
   let image = riderlessFlightFrames.get(key);
@@ -286,13 +294,9 @@ function drawDeathBird(rider, death, facingLeft) {
     image.height = height;
     const imageCtx = image.getContext('2d');
     imageCtx.drawImage(spriteSheet, frame.x, frame.y, width, height, 0, 0, width, height);
-    // Remove the rider and, for the enemy, the lance pixels above the bird.
-    if (rider === player) {
-      imageCtx.clearRect(2, 0, 9, 9);
-    } else {
-      imageCtx.clearRect(3, 0, 7, 7);
-      imageCtx.clearRect(7, 3, 7, 3);
-    }
+    // Remove the enemy rider and lance pixels above the bird.
+    imageCtx.clearRect(3, 0, 7, 7);
+    imageCtx.clearRect(7, 3, 7, 3);
     riderlessFlightFrames.set(key, image);
   }
   if (!image) return;

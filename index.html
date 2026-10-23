@@ -268,23 +268,9 @@ function drawDeathBird(rider, death, facingLeft) {
     drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
     return;
   }
-  if (!death.wasFlying && death.elapsed < 0.25) {
-    const frame = loneBirdFrames[Math.floor(death.elapsed * 4) % loneBirdFrames.length];
-    drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
-    return;
-  }
-
-  // The sheet includes a separate riderless blue flight animation. Use it
-  // directly so the player's head and upper body aren't erased with the rider.
-  if (rider === player) {
-    const frame = loneBirdFrames[Math.floor(death.elapsed * 4) % loneBirdFrames.length];
-    drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
-    return;
-  }
-
-  const frames = enemyFlightFrames;
+  const frames = rider === player ? playerFlightFrames : enemyFlightFrames;
   const frame = frames[Math.floor(death.elapsed * 4) % frames.length];
-  const key = `${frame.x}:${frame.y}`;
+  const key = `${rider === player ? 'player' : 'enemy'}:${frame.x}:${frame.y}`;
   let image = riderlessFlightFrames.get(key);
   if (!image && spriteSheet.complete && spriteSheet.naturalWidth) {
     const width = frame.width || 14;
@@ -294,9 +280,20 @@ function drawDeathBird(rider, death, facingLeft) {
     image.height = height;
     const imageCtx = image.getContext('2d');
     imageCtx.drawImage(spriteSheet, frame.x, frame.y, width, height, 0, 0, width, height);
-    // Remove the enemy rider and lance pixels above the bird.
-    imageCtx.clearRect(3, 0, 7, 7);
-    imageCtx.clearRect(7, 3, 7, 3);
+    if (rider === player) {
+      // The blue flight frames overlap the yellow rider. Key out only the
+      // rider's yellow pixels so the ostrich's head and upper body remain.
+      const pixels = imageCtx.getImageData(0, 0, width, height);
+      for (let i = 0; i < pixels.data.length; i += 4) {
+        const [red, green, blue] = pixels.data.subarray(i, i + 3);
+        if (red >= 220 && green >= 220 && blue <= 32) pixels.data[i + 3] = 0;
+      }
+      imageCtx.putImageData(pixels, 0, 0);
+    } else {
+      // Remove the enemy rider and lance pixels above the bird.
+      imageCtx.clearRect(3, 0, 7, 7);
+      imageCtx.clearRect(7, 3, 7, 3);
+    }
     riderlessFlightFrames.set(key, image);
   }
   if (!image) return;

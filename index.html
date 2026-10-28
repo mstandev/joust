@@ -38,12 +38,12 @@ const playerWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 63 }));
 const playerFlightFrames = [247, 262].map(x => ({ x, y: 102, width: 14, height: 13, drawHeight: 43 }));
 const enemyWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 193 }));
 const enemyFlightFrames = [247, 262].map(x => ({ x, y: 214, width: 14, height: 14, drawHeight: 46 }));
+const enemyDeathFlightFrames = [247, 262].map(x => ({ x, y: 243, width: 14, height: 14 }));
 // The bottom two blue ostrich cells are the riderless flight animation.
 const loneBirdFrames = [247, 262].map(x => ({ x, y: 170, width: 14, height: 14 }));
 const loneBirdWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 140, width: 14, height: 18 }));
 const playerSpawnFrames = [323, 338, 353, 368, 383, 398]
   .map(x => ({ x, y: 363, width: 14, height: 20 }));
-const riderlessFlightFrames = new Map();
 const player = {
   x: 250, y: 344, vx: 0, vy: 0, onPlatform: false, facingLeft: false,
   animationClock: 0, animBoost: 0, death: null, spawn: null
@@ -269,41 +269,13 @@ function drawDeathBird(rider, death, facingLeft) {
     drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
     return;
   }
-  // Use the dedicated riderless flight cells for the player. The ridden
-  // frames overlap the rider's colors with the bird's beak and body details.
   if (rider === player) {
     const frame = loneBirdFrames[Math.floor(death.elapsed * 4) % loneBirdFrames.length];
     drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
     return;
   }
-
-  const frames = enemyFlightFrames;
-  const frame = frames[Math.floor(death.elapsed * 4) % frames.length];
-  const key = `${rider === player ? 'player' : 'enemy'}:${frame.x}:${frame.y}`;
-  let image = riderlessFlightFrames.get(key);
-  if (!image && spriteSheet.complete && spriteSheet.naturalWidth) {
-    const width = frame.width || 14;
-    const height = frame.height || 20;
-    image = document.createElement('canvas');
-    image.width = width;
-    image.height = height;
-    const imageCtx = image.getContext('2d');
-    imageCtx.drawImage(spriteSheet, frame.x, frame.y, width, height, 0, 0, width, height);
-    // Remove the enemy rider and lance pixels above the bird.
-    imageCtx.clearRect(3, 0, 7, 7);
-    imageCtx.clearRect(7, 3, 7, 3);
-    riderlessFlightFrames.set(key, image);
-  }
-  if (!image) return;
-
-  ctx.save();
-  ctx.imageSmoothingEnabled = false;
-  if (facingLeft) {
-    ctx.translate(death.birdX * 2, 0);
-    ctx.scale(-1, 1);
-  }
-  ctx.drawImage(image, death.birdX - 25, death.birdY - 24, 50, 48);
-  ctx.restore();
+  const frame = enemyDeathFlightFrames[Math.floor(death.elapsed * 4) % enemyDeathFlightFrames.length];
+  drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
 }
 function drawDeath(rider) {
   const death = rider.death;

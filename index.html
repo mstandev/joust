@@ -38,7 +38,8 @@ const playerWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 63 }));
 const playerFlightFrames = [247, 262].map(x => ({ x, y: 102, width: 14, height: 13, drawHeight: 43 }));
 const enemyWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 193 }));
 const enemyFlightFrames = [247, 262].map(x => ({ x, y: 214, width: 14, height: 14, drawHeight: 46 }));
-const loneBirdFrames = [247, 262].map(x => ({ x, y: 120, width: 14, height: 14 }));
+// The sheet has one riderless flight cel at this row; x262 is empty space.
+const loneBirdFrames = [{ x: 247, y: 120, width: 14, height: 14 }];
 const loneBirdWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 140, width: 14, height: 18 }));
 const playerSpawnFrames = [323, 338, 353, 368, 383, 398]
   .map(x => ({ x, y: 363, width: 14, height: 20 }));

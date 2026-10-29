@@ -5,11 +5,19 @@
 <title>Joust</title>
 <style>
   body { margin: 0; background: #000; color: white; font: 16px system-ui; }
-  canvas { display: block; margin: 24px auto; background: #000; }
+  canvas {
+    display: block;
+    width: min(1100px, calc(100vw - 32px));
+    height: auto;
+    aspect-ratio: 55 / 31;
+    margin: 24px auto;
+    background: #000;
+    image-rendering: pixelated;
+  }
   p { text-align: center; }
 </style>
 <canvas id="game" width="1100" height="620"></canvas>
-<p>← → to steer · ↑ or Space to flap</p>
+<p>← → to steer · ↑ or Space to flap · touch eggs for bonus points</p>
 <script>
 const canvas = document.querySelector('#game');
 const ctx = canvas.getContext('2d');
@@ -20,10 +28,14 @@ const flapLift = 0.28;
 const maxVerticalSpeed = 3.4;
 const steeringAcceleration = 0.22;
 const maxHorizontalSpeed = 2.8;
+const eggScoreValue = 100;
+const hatchlingScoreValue = 50;
+const eggHatchDelay = 5;
+const eggRadius = 9;
 // Tan platform collision bounds mapped from the background crop to canvas pixels.
 const platforms = [
-  { x: 0,   y: 97,  bottom: 119, width: 120 }, { x: 924, y: 97,  bottom: 122, width: 176 },
-  { x: 310, y: 131, bottom: 160, width: 328 },
+  { x: 0,   y: 98,  bottom: 120, width: 120 }, { x: 924, y: 98,  bottom: 123, width: 176 },
+  { x: 310, y: 132, bottom: 161, width: 328, passSides: true },
   { x: 0,   y: 294, bottom: 319, width: 236 }, { x: 735, y: 269, bottom: 300, width: 217 },
   { x: 938, y: 294, bottom: 319, width: 162 },
   { x: 379, y: 366, bottom: 391, width: 240 },
@@ -39,25 +51,34 @@ const playerFlightFrames = [247, 262].map(x => ({ x, y: 102, width: 14, height: 
 const enemyWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 193 }));
 const enemyFlightFrames = [247, 262].map(x => ({ x, y: 214, width: 14, height: 14, drawHeight: 46 }));
 const enemyDeathFlightFrames = [247, 262].map(x => ({ x, y: 243, width: 14, height: 14 }));
-// The bottom two blue ostrich cells are the riderless flight animation.
-const loneBirdFrames = [247, 262].map(x => ({ x, y: 170, width: 14, height: 14 }));
+// Row 7: the two riderless blue ostrich flight cels.
+const loneBirdFrames = [247, 262].map(x => ({ x, y: 156, width: 14, height: 14 }));
 const loneBirdWalkFrames = [247, 262, 277, 292].map(x => ({ x, y: 140, width: 14, height: 18 }));
 const playerSpawnFrames = [323, 338, 353, 368, 383, 398]
   .map(x => ({ x, y: 363, width: 14, height: 20 }));
+// The three foot-rider colors in the sheet: red, gray, and blue.
+const standaloneRiderFrames = [247, 255, 263]
+  .map(x => ({ x, y: 307, width: 8, height: 16 }));
 const player = {
   x: 250, y: 344, vx: 0, vy: 0, onPlatform: false, facingLeft: false,
   animationClock: 0, animBoost: 0, death: null, spawn: null
 };
 const enemy = {
   x: 825, y: 344, vx: -1.5, vy: 0, onPlatform: false,
-  animationClock: 0, animBoost: 0, death: null
+  animationClock: 0, animBoost: 0, death: null, active: true
 };
+let egg = null;
+let hatchling = null;
+let nextHatchlingRiderFrame = 0;
+let rescueBird = null;
+let enemyRespawnTimer = 0;
 let score = 0, keys = {};
 addEventListener('keydown', e => {
   keys[e.code] = true;
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'Space'].includes(e.code)) e.preventDefault();
 });
 addEventListener('keyup', e => keys[e.code] = false);
+function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 function resetPlayer() {
   const points = platforms.map(platform => ({
     x: platform.x + platform.width / 2,
@@ -69,6 +90,25 @@ function resetPlayer() {
   const spawnPoint = choices[Math.floor(Math.random() * choices.length)];
   player.x = spawnPoint.x; player.y = spawnPoint.y; player.vx = 0; player.vy = 0;
   player.onPlatform = true; player.facingLeft = false; player.animBoost = 0; player.death = null;
+}
+function resetEnemy() {
+  enemy.x = 825; enemy.y = 344; enemy.vx = -1.5;
+  enemy.vy = 0; enemy.onPlatform = false; enemy.animBoost = 0;
+  enemy.animationClock = 0; enemy.death = null; enemy.active = true;
+}
+function dropEgg(x, y) {
+  const platformsBelow = platforms.filter(platform => platform.y >= y + eggRadius);
+  const candidates = platformsBelow.length ? platformsBelow : platforms;
+  const targetPlatform = candidates.reduce((nearest, platform) => {
+    const targetX = clamp(x, platform.x + eggRadius, platform.x + platform.width - eggRadius);
+    const distance = Math.hypot(targetX - x, platform.y - y);
+    return distance < nearest.distance ? { platform, targetX, distance } : nearest;
+  }, { platform: platforms[0], targetX: x, distance: Infinity });
+  egg = {
+    x, y, vx: 0, vy: 0, landed: false,
+    platform: null, targetPlatform: targetPlatform.platform,
+    targetX: targetPlatform.targetX, hatchTimer: eggHatchDelay
+  };
 }
 function startDeath(rider) {
   const direction = rider === player
@@ -88,6 +128,7 @@ function startDeath(rider) {
     birdVX: direction * (wasWalking ? 1.4 : 2.8), birdVY: wasWalking ? 0 : -1.1,
     riderX: rider.x, riderY: rider.y
   };
+  if (rider === enemy) dropEgg(rider.x, rider.y);
   rider.onPlatform = false;
 }
 function finishDeath(rider) {
@@ -96,8 +137,7 @@ function finishDeath(rider) {
     resetPlayer();
     player.spawn = { elapsed: 0 };
   } else {
-    enemy.x = 825; enemy.y = 344; enemy.vx = -1.5 - score * 0.1;
-    enemy.vy = 0; enemy.onPlatform = false; enemy.animBoost = 0;
+    enemy.active = false;
   }
 }
 function updateDeath(rider) {
@@ -125,6 +165,107 @@ function updateSpawn() {
   player.spawn.elapsed += 1 / 60;
   if (player.spawn.elapsed >= playerSpawnFrames.length / 7) player.spawn = null;
 }
+function hatchEgg() {
+  const platform = egg.platform || egg.targetPlatform;
+  hatchling = {
+    x: egg.x, y: platform.y - 15, platform,
+    animationClock: 0,
+    riderFrame: standaloneRiderFrames[nextHatchlingRiderFrame]
+  };
+  nextHatchlingRiderFrame = (nextHatchlingRiderFrame + 1) % standaloneRiderFrames.length;
+  const fromLeft = hatchling.x > canvas.width / 2;
+  rescueBird = {
+    x: fromLeft ? -30 : canvas.width + 30,
+    y: clamp(hatchling.y - 170, 50, canvas.height - 80),
+    vx: fromLeft ? 1.8 : -1.8, vy: 0,
+    direction: fromLeft ? 1 : -1, animationClock: 0
+  };
+  egg = null;
+}
+function updateEgg() {
+  if (!egg) return;
+  if (!player.death && !player.spawn && Math.hypot(player.x - egg.x, player.y - egg.y) < 28) {
+    score += eggScoreValue;
+    egg = null;
+    enemyRespawnTimer = 1.8;
+    return;
+  }
+
+  if (!egg.landed) {
+    const previousY = egg.y;
+    egg.vy = Math.min(4.2, egg.vy + gravity);
+    egg.vx = clamp((egg.targetX - egg.x) * 0.08, -3, 3);
+    egg.x += egg.vx;
+    egg.y += egg.vy;
+    const platform = platforms.find(p =>
+      previousY + eggRadius <= p.y && egg.y + eggRadius >= p.y &&
+      egg.x + eggRadius > p.x && egg.x - eggRadius < p.x + p.width
+    );
+    if (platform) {
+      egg.y = platform.y - eggRadius;
+      egg.vy = 0;
+      egg.landed = true;
+      egg.platform = platform;
+    } else if (egg.y >= canvas.height - eggRadius) {
+      egg.y = canvas.height - eggRadius;
+      egg.vy = 0;
+      egg.landed = true;
+      egg.platform = { x: 0, y: canvas.height, width: canvas.width };
+    }
+  } else {
+    egg.hatchTimer -= 1 / 60;
+    if (egg.hatchTimer <= 0) hatchEgg();
+  }
+}
+function updateRescueBird() {
+  if (!rescueBird) return;
+  if (rescueBird.departing) {
+    rescueBird.x += rescueBird.vx;
+    rescueBird.y += rescueBird.vy;
+    rescueBird.animationClock += 1 / 60;
+    if (rescueBird.x < -55 || rescueBird.x > canvas.width + 55 ||
+        rescueBird.y < -55 || rescueBird.y > canvas.height + 55) rescueBird = null;
+    return;
+  }
+  if (!hatchling) return;
+  const dx = hatchling.x - rescueBird.x;
+  const targetY = hatchling.y - 28;
+  rescueBird.vx = clamp(dx * 0.025, -2.5, 2.5);
+  rescueBird.vy = clamp((targetY - rescueBird.y) * 0.04, -2, 2);
+  rescueBird.x += rescueBird.vx;
+  rescueBird.y += rescueBird.vy;
+  rescueBird.animationClock += 1 / 60;
+  if (Math.abs(dx) < 24 && Math.abs(targetY - rescueBird.y) < 28 && !enemy.death) {
+    enemy.x = rescueBird.x;
+    enemy.y = rescueBird.y + 12;
+    enemy.vx = rescueBird.vx < 0 ? -1.5 : 1.5;
+    enemy.vy = -0.35;
+    enemy.onPlatform = false;
+    enemy.animationClock = 0;
+    enemy.animBoost = 0;
+    enemy.active = true;
+    hatchling = null;
+    rescueBird = null;
+  }
+}
+function updateHatchlingCollision() {
+  if (!hatchling || player.death || player.spawn) return;
+  const close = Math.abs(player.x - hatchling.x) < riderHalfWidth + 10 &&
+    Math.abs(player.y - hatchling.y) < riderHalfHeight + 12;
+  if (!close) return;
+  if (player.y < hatchling.y - 6) {
+    score += hatchlingScoreValue;
+    hatchling = null;
+    if (rescueBird) {
+      rescueBird.departing = true;
+      rescueBird.vx = rescueBird.direction * 2.5;
+      rescueBird.vy = -0.35;
+    }
+    enemyRespawnTimer = 1.8;
+  } else {
+    startDeath(player);
+  }
+}
 function bounceAnimation(rider) { rider.animBoost = Math.max(rider.animBoost, 2.8); }
 function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
   rider.onPlatform = false;
@@ -135,6 +276,7 @@ function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
 
   if (checkSides && rider.vx > 0) {
     const platform = platforms.find(p =>
+      !p.passSides &&
       previousX + riderHalfWidth <= p.x && rider.x + riderHalfWidth >= p.x &&
       overlapsVertically(p)
     );
@@ -146,6 +288,7 @@ function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
     }
   } else if (checkSides && rider.vx < 0) {
     const platform = platforms.find(p =>
+      !p.passSides &&
       previousX - riderHalfWidth >= p.x + p.width && rider.x - riderHalfWidth <= p.x + p.width &&
       overlapsVertically(p)
     );
@@ -225,12 +368,21 @@ function updateEnemy() {
 }
 function update() {
   const playerWasActive = !player.death;
-  const enemyWasActive = !enemy.death;
+  const enemyWasActive = enemy.active && !enemy.death;
   if (player.death) updateDeath(player);
   else if (player.spawn) updateSpawn();
   else updatePlayer();
-  if (enemy.death) updateDeath(enemy); else updateEnemy();
-  if (playerWasActive && enemyWasActive && !player.death && !player.spawn && !enemy.death) {
+  if (enemy.death) updateDeath(enemy);
+  else if (enemy.active) updateEnemy();
+  if (enemyRespawnTimer > 0 && !enemy.death && !enemy.active) {
+    enemyRespawnTimer -= 1 / 60;
+    if (enemyRespawnTimer <= 0) resetEnemy();
+  }
+  updateEgg();
+  updateRescueBird();
+  updateHatchlingCollision();
+  if (hatchling) hatchling.animationClock += 1 / 60;
+  if (playerWasActive && enemyWasActive && !player.death && !player.spawn && !enemy.death && enemy.active) {
     const close = Math.abs(player.x - enemy.x) < riderHalfWidth * 2 &&
       Math.abs(player.y - enemy.y) < riderHalfHeight * 2;
     if (close) {
@@ -263,6 +415,47 @@ function drawRider(rider, frames, facingLeft) {
   drawAtlasSprite(frame, rider.x, rider.y, riderSpriteWidth,
     frame.drawHeight || riderSpriteHeight, facingLeft);
 }
+function drawPixelPattern(pattern, palette, centerX, centerY, pixelSize) {
+  const width = pattern[0].length;
+  const height = pattern.length;
+  const left = centerX - width * pixelSize / 2;
+  const top = centerY - height * pixelSize / 2;
+  pattern.forEach((row, y) => {
+    [...row].forEach((pixel, x) => {
+      if (pixel === '.') return;
+      ctx.fillStyle = palette[pixel];
+      ctx.fillRect(left + x * pixelSize, top + y * pixelSize, pixelSize, pixelSize);
+    });
+  });
+}
+function drawEgg(item) {
+  const eggPattern = [
+    '....DD....',
+    '...DCCCD..',
+    '..DCCCCCD.',
+    '.DCCCCCCCD',
+    '.DCCCCCCCD',
+    '.DCCYCCCCD',
+    '.DCCYCCCCD',
+    '..DCCCCCD.',
+    '...DCCCD..',
+    '....DD....'
+  ];
+  drawPixelPattern(eggPattern, { D: '#75411b', C: '#fff0ad', Y: '#dfb44a' }, item.x, item.y, 2);
+  if (item.landed && item.hatchTimer < 1.2) {
+    ctx.fillStyle = '#75411b';
+    ctx.fillRect(item.x - 1, item.y - 3, 2, 5);
+    ctx.fillRect(item.x + 2, item.y, 2, 4);
+  }
+}
+function drawHatchling(item) {
+  const bob = Math.round(Math.sin(item.animationClock * 5));
+  drawAtlasSprite(item.riderFrame, item.x, item.y + bob, 29, 58);
+}
+function drawRescueBird(bird) {
+  const frame = enemyDeathFlightFrames[Math.floor(bird.animationClock * 7) % enemyDeathFlightFrames.length];
+  drawAtlasSprite(frame, bird.x, bird.y, 50, 48, bird.vx < 0);
+}
 function drawDeathBird(rider, death, facingLeft) {
   if (death.phase === 'walk') {
     const frame = loneBirdWalkFrames[Math.floor(death.elapsed * 6) % loneBirdWalkFrames.length];
@@ -280,24 +473,25 @@ function drawDeathBird(rider, death, facingLeft) {
 function drawDeath(rider) {
   const death = rider.death;
   if (!death) return;
+  if (death.elapsed < 0.3) {
+    drawAtlasSprite({ x: 247, y: 170, width: 7, height: 9 },
+      death.riderX, death.riderY, 24, 20);
+  } else if (death.elapsed < 0.78) {
+    drawAtlasSprite({ x: 255, y: 170, width: 10, height: 11 },
+      death.riderX, death.riderY, 30, 30);
+  } else if (death.elapsed < 1.425) {
+    drawAtlasSprite({ x: 265, y: 170, width: 12, height: 11 },
+      death.riderX, death.riderY, 36, 34);
+  }
   const birdGone = death.birdX < -45 || death.birdX > canvas.width + 45 ||
     death.birdY < -45 || death.birdY > canvas.height + 45;
   if (!birdGone) {
     drawDeathBird(rider, death, death.direction < 0);
   }
-  if (death.elapsed < 0.3) {
-    drawAtlasSprite({ x: 271, y: 286, width: 9, height: 7 },
-      death.riderX, death.riderY, 24, 20, false, 'hue-rotate(-120deg) saturate(1.4)');
-  } else if (death.elapsed < 0.78) {
-    drawAtlasSprite({ x: 247, y: 286, width: 8, height: 8 },
-      death.riderX, death.riderY, 30, 30, false, 'hue-rotate(70deg) saturate(1.2)');
-  } else if (death.elapsed < 1.425) {
-    drawAtlasSprite({ x: 255, y: 286, width: 8, height: 8 },
-      death.riderX, death.riderY, 36, 34, false, 'hue-rotate(70deg) saturate(1.2)');
-  }
 }
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = false;
   // The sprite sheet's upper-left panel contains the arena backdrop and platforms.
   if (spriteSheet.complete && spriteSheet.naturalWidth) {
     ctx.drawImage(spriteSheet, 0, 42, 238, 198, 0, 0, canvas.width, canvas.height);
@@ -312,7 +506,10 @@ function draw() {
     drawAtlasSprite(frame, player.x, player.y, riderSpriteWidth, riderSpriteHeight);
   } else drawRider(player, playerFrames, player.facingLeft);
   if (enemy.death) drawDeath(enemy);
-  else drawRider(enemy, enemy.onPlatform ? enemyWalkFrames : enemyFlightFrames, enemy.vx < 0);
+  else if (enemy.active) drawRider(enemy, enemy.onPlatform ? enemyWalkFrames : enemyFlightFrames, enemy.vx < 0);
+  if (egg) drawEgg(egg);
+  if (hatchling) drawHatchling(hatchling);
+  if (rescueBird) drawRescueBird(rescueBird);
   ctx.fillStyle = 'white'; ctx.fillText(`Score: ${score}`, 20, 28);
 }
 function loop() { update(); draw(); requestAnimationFrame(loop); }

@@ -16,7 +16,7 @@
   }
   p { text-align: center; }
 </style>
-<canvas id="game" width="1100" height="620"></canvas>
+<canvas id="game" width="1100" height="620" tabindex="0" aria-label="Joust game screen"></canvas>
 <p>← → to steer · ↑ or Space to flap</p>
 <script>
 const canvas = document.querySelector('#game');
@@ -29,8 +29,10 @@ const maxVerticalSpeed = 3.4;
 const flightMovementScale = 0.8;
 const steeringAcceleration = 0.22;
 const maxHorizontalSpeed = 2.8;
-const eggScoreValue = 5;
-const hatchlingScoreValue = 7;
+const enemyScoreValues = { green: 500, alternate: 750, shadow: 1500 };
+const eggCatchScores = [250, 500, 750, 1000];
+const midairEggBonus = 500;
+const playerDeathPenalty = 50;
 const eggHatchDelay = 5;
 const eggRadius = 9;
 // Tan platform collision bounds mapped from the background crop to canvas pixels.
@@ -44,9 +46,13 @@ const platforms = [
 ];
 const riderHalfWidth = 23;
 const riderHalfHeight = 29;
+const maxActiveEnemies = 10;
+const maxEnemyRecords = maxActiveEnemies * 2;
+const stuckProgressThreshold = 8;
+const stuckTimeout = 0.25;
+const enemyDeathReplacementDelay = 1;
+const idleEnemySpawnInterval = 50;
 const enemySpawnX = canvas.width + riderHalfWidth;
-const maxEnemyCount = 5;
-const enemySpawnInterval = 1.35;
 const riderSpriteWidth = 46;
 const riderSpriteHeight = 58;
 const playerStandFrames = [{ x: 247, y: 44, offsetY: 2 }];
@@ -79,29 +85,81 @@ const playerSpawnFrames = [323, 338, 353, 368, 383, 398]
 // The three foot-rider colors in the sheet: red, gray, and blue.
 const standaloneRiderFrames = [247, 255, 263]
   .map(x => ({ x, y: 307, width: 8, height: 16 }));
+const eggPattern = [
+  '....DD....',
+  '...DCCCD..',
+  '..DCCCCCD.',
+  '.DCCCCCCCD',
+  '.DCCCCCCCD',
+  '.DCCYCCCCD',
+  '.DCCYCCCCD',
+  '..DCCCCCD.',
+  '...DCCCD..',
+  '....DD....'
+];
+const eggPalette = { D: '#75411b', C: '#fff0ad', Y: '#dfb44a' };
 const player = {
   x: 250, y: 344, vx: 0, vy: 0, onPlatform: false, facingLeft: false,
   animationClock: 0, animBoost: 0, death: null, spawn: null
 };
-function createEnemy(id) {
+function createEnemy() {
   return {
-    id, x: enemySpawnX, y: 344, vx: -1.5, vy: 0, onPlatform: false,
+    x: enemySpawnX, y: 344, vx: -1.5, vy: 0, onPlatform: false,
     animationClock: 0, animBoost: 0, death: null, active: false,
     aiMode: 'enter', aiClock: 0, evadeTimer: 0, evadeCooldown: 0,
-    spawnDirection: -1, patrolDirection: -1, patrolCenterY: 344, lastSpawnFromLeft: null,
-    spawnDelay: id * enemySpawnInterval, respawnTimer: null,
+    spawnDirection: -1, patrolDirection: -1, patrolCenterY: 344,
     egg: null, hatchling: null, rescueBird: null
   };
 }
-const enemies = Array.from({ length: maxEnemyCount }, (_, id) => createEnemy(id));
+const enemies = [createEnemy()];
 let nextHatchlingRiderFrame = 0;
 let score = 0, keys = {};
+let eggsCaughtThisRun = 0;
+let gameTime = 0;
+let enemySpawnQueue = [];
+let nextIdleEnemySpawnAt = idleEnemySpawnInterval;
 addEventListener('keydown', e => {
   keys[e.code] = true;
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'Space'].includes(e.code)) e.preventDefault();
 });
 addEventListener('keyup', e => keys[e.code] = false);
+addEventListener('blur', () => { keys = {}; });
+canvas.addEventListener('pointerdown', () => canvas.focus({ preventScroll: true }));
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+function enemyScoreValue(type) { return enemyScoreValues[type] || 0; }
+function queueEnemySpawn(delay = 0) {
+  enemySpawnQueue.push(gameTime + delay);
+}
+function nextEggCatchScore() {
+  const points = eggCatchScores[Math.min(eggsCaughtThisRun, eggCatchScores.length - 1)];
+  eggsCaughtThisRun++;
+  return points;
+}
+function wrappedHorizontalGap(firstX, secondX) {
+  const gap = Math.abs(firstX - secondX) % canvas.width;
+  return Math.min(gap, canvas.width - gap);
+}
+function updateStuckRecovery(bird, dt, wraps = false) {
+  if (!Number.isFinite(bird.stuckX) || !Number.isFinite(bird.stuckY)) {
+    bird.stuckX = bird.x;
+    bird.stuckY = bird.y;
+    bird.stuckTimer = 0;
+    return false;
+  }
+  const dx = wraps ? wrappedHorizontalGap(bird.x, bird.stuckX) : Math.abs(bird.x - bird.stuckX);
+  if (Math.hypot(dx, bird.y - bird.stuckY) >= stuckProgressThreshold) {
+    bird.stuckX = bird.x;
+    bird.stuckY = bird.y;
+    bird.stuckTimer = 0;
+    return false;
+  }
+  bird.stuckTimer = (bird.stuckTimer || 0) + dt;
+  if (bird.stuckTimer < stuckTimeout) return false;
+  bird.stuckX = bird.x;
+  bird.stuckY = bird.y;
+  bird.stuckTimer = 0;
+  return true;
+}
 function resetPlayer() {
   const points = platforms.map(platform => ({
     x: platform.x + platform.width / 2,
@@ -116,23 +174,37 @@ function resetPlayer() {
   player.onPlatform = true; player.facingLeft = false; player.animBoost = 0; player.death = null;
 }
 function resetEnemy(enemy) {
-  enemy.type = Math.random() < 0.5 ? 'green' : 'alternate';
-  const fromLeft = enemy.lastSpawnFromLeft === null
-    ? Math.random() < 0.5
-    : !enemy.lastSpawnFromLeft;
-  enemy.lastSpawnFromLeft = fromLeft;
+  enemy.type = Math.random() < 2 / 3 ? 'green' : 'alternate';
+  const fromLeft = Math.random() < 0.5;
   enemy.spawnDirection = fromLeft ? 1 : -1;
   enemy.patrolDirection = enemy.spawnDirection;
   enemy.x = fromLeft ? -riderHalfWidth : enemySpawnX;
   enemy.y = riderHalfHeight + Math.random() * (canvas.height - riderHalfHeight * 2);
+  enemy.stuckX = enemy.x;
+  enemy.stuckY = enemy.y;
+  enemy.stuckTimer = 0;
   enemy.patrolCenterY = riderHalfHeight + 55 +
     Math.random() * (canvas.height - riderHalfHeight * 2 - 110);
   enemy.vx = enemy.spawnDirection * 1.5;
   enemy.vy = 0; enemy.onPlatform = false; enemy.animBoost = 0;
   enemy.animationClock = 0; enemy.death = null; enemy.active = true;
   enemy.aiMode = 'enter'; enemy.aiClock = 0; enemy.evadeTimer = 0; enemy.evadeCooldown = 0;
-  enemy.spawnDelay = null; enemy.respawnTimer = null;
   enemy.egg = null; enemy.hatchling = null;
+}
+function spawnNextEnemy() {
+  // Reserve the final slot for a riderless bird picking up a hatched rider.
+  if (enemies.filter(candidate => candidate.active).length >= maxActiveEnemies - 1) return false;
+  let enemy = enemies.find(candidate =>
+    !candidate.active && !candidate.death && !candidate.egg &&
+    !candidate.hatchling && !candidate.rescueBird
+  );
+  if (!enemy) {
+    if (enemies.length >= maxEnemyRecords) return false;
+    enemy = createEnemy();
+    enemies.push(enemy);
+  }
+  resetEnemy(enemy);
+  return true;
 }
 function dropEgg(enemy, x, y) {
   const platformsBelow = platforms.filter(platform => platform.y >= y + eggRadius);
@@ -149,11 +221,10 @@ function dropEgg(enemy, x, y) {
   };
 }
 function startDeath(rider) {
-  if (rider === player) score = Math.max(0, score - 1);
+  if (rider === player) score = Math.max(0, score - playerDeathPenalty);
   const direction = rider === player
     ? (rider.facingLeft ? -1 : 1)
     : (rider.vx < 0 ? -1 : 1);
-  const wasFlying = !rider.onPlatform;
   const platform = rider.onPlatform && platforms.find(p =>
     rider.x >= p.x && rider.x <= p.x + p.width &&
     Math.abs(rider.y + riderHalfHeight - p.y) <= 3);
@@ -161,13 +232,16 @@ function startDeath(rider) {
     (rider === player && (keys.ArrowLeft || keys.ArrowRight))));
   rider.death = {
     elapsed: 0, direction, phase: wasWalking ? 'walk' : 'fly',
-    wasFlying,
     walkEdge: platform ? (direction < 0 ? platform.x - 25 : platform.x + platform.width + 25) : null,
     birdX: rider.x, birdY: rider.y,
     birdVX: direction * (wasWalking ? 1.4 : 2.8), birdVY: wasWalking ? 0 : -1.1,
     riderX: rider.x, riderY: rider.y
   };
-  if (rider !== player) dropEgg(rider, rider.x, rider.y);
+  if (rider !== player) {
+    dropEgg(rider, rider.x, rider.y);
+    queueEnemySpawn(enemyDeathReplacementDelay);
+    nextIdleEnemySpawnAt = gameTime + idleEnemySpawnInterval;
+  }
   rider.onPlatform = false;
 }
 function finishDeath(rider) {
@@ -182,8 +256,36 @@ function finishDeath(rider) {
 function updateDeath(rider) {
   const death = rider.death;
   death.elapsed += 1 / 60;
-  const flightScale = death.phase === 'fly' ? flightMovementScale : 1;
-  death.birdX += death.birdVX * flightScale;
+  const bird = {
+    x: death.birdX, y: death.birdY,
+    vx: death.birdVX, vy: death.birdVY,
+    onPlatform: death.phase === 'walk', animBoost: 0,
+    stuckX: death.stuckX, stuckY: death.stuckY, stuckTimer: death.stuckTimer
+  };
+  const previousX = bird.x;
+  const previousY = bird.y;
+  if (death.phase === 'walk') {
+    bird.x += bird.vx;
+  } else {
+    bird.x += bird.vx * flightMovementScale;
+    bird.y += bird.vy * flightMovementScale;
+    bird.vy += 0.015;
+  }
+  const collision = collideWithPlatforms(bird, previousX, previousY);
+  if (collision?.side === 'top' && death.phase === 'fly') bird.vy = -1.1;
+  if (updateStuckRecovery(bird, 1 / 60)) {
+    bird.vx = -bird.vx;
+    bird.vy = -1.2;
+    if (death.phase === 'walk') death.phase = 'fly';
+  }
+  death.birdX = bird.x;
+  death.birdY = bird.y;
+  death.birdVX = bird.vx;
+  death.birdVY = bird.vy;
+  death.stuckX = bird.stuckX;
+  death.stuckY = bird.stuckY;
+  death.stuckTimer = bird.stuckTimer;
+  if (bird.vx) death.direction = Math.sign(bird.vx);
   if (death.phase === 'walk') {
     const walkedOff = death.direction < 0
       ? death.birdX <= death.walkEdge
@@ -193,9 +295,6 @@ function updateDeath(rider) {
       death.birdVX = death.direction * 2.8;
       death.birdVY = -1.1;
     }
-  } else {
-    death.birdY += death.birdVY * flightMovementScale;
-    death.birdVY += 0.015;
   }
   const birdGone = death.birdX < -45 || death.birdX > canvas.width + 45 ||
     death.birdY < -45 || death.birdY > canvas.height + 45;
@@ -208,7 +307,7 @@ function updateSpawn() {
 function hatchEgg(enemy) {
   const platform = enemy.egg.platform || enemy.egg.targetPlatform;
   enemy.hatchling = {
-    x: enemy.egg.x, y: platform.y - 15, platform,
+    x: enemy.egg.x, y: platform.y - 15,
     animationClock: 0,
     riderFrame: standaloneRiderFrames[nextHatchlingRiderFrame]
   };
@@ -218,7 +317,7 @@ function hatchEgg(enemy) {
     x: fromLeft ? -30 : canvas.width + 30,
     y: clamp(enemy.hatchling.y - 170, 50, canvas.height - 80),
     vx: fromLeft ? 1.8 : -1.8, vy: 0, type: enemy.type,
-    direction: fromLeft ? 1 : -1, animationClock: 0
+    direction: fromLeft ? 1 : -1, animationClock: 0, animBoost: 0
   };
   enemy.egg = null;
 }
@@ -226,9 +325,8 @@ function updateEgg(enemy) {
   const egg = enemy.egg;
   if (!egg) return;
   if (!player.death && !player.spawn && Math.hypot(player.x - egg.x, player.y - egg.y) < 28) {
-    score += eggScoreValue;
+    score += nextEggCatchScore() + (egg.landed ? 0 : midairEggBonus);
     enemy.egg = null;
-    enemy.respawnTimer = 1.8;
     return;
   }
   const enemyCollector = enemies.find(other =>
@@ -237,7 +335,6 @@ function updateEgg(enemy) {
   );
   if (enemyCollector) {
     enemy.egg = null;
-    enemy.respawnTimer = 1.8;
     return;
   }
 
@@ -257,37 +354,139 @@ function updateEgg(enemy) {
       egg.landed = true;
       egg.platform = platform;
     } else if (egg.y >= canvas.height - eggRadius) {
-      egg.y = canvas.height - eggRadius;
-      egg.vy = 0;
-      egg.landed = true;
-      egg.platform = { x: 0, y: canvas.height, width: canvas.width };
+      enemy.egg = null;
+      queueEnemySpawn();
+      return;
     }
   } else {
     egg.hatchTimer -= 1 / 60;
     if (egg.hatchTimer <= 0) hatchEgg(enemy);
   }
 }
+function rescuePathBlocked(start, end, rect) {
+  let minT = 0;
+  let maxT = 1;
+  for (const axis of ['x', 'y']) {
+    const delta = end[axis] - start[axis];
+    const min = axis === 'x' ? rect.left : rect.top;
+    const max = axis === 'x' ? rect.right : rect.bottom;
+    if (Math.abs(delta) < 1e-8) {
+      if (start[axis] <= min || start[axis] >= max) return false;
+      continue;
+    }
+    const first = (min - start[axis]) / delta;
+    const second = (max - start[axis]) / delta;
+    minT = Math.max(minT, Math.min(first, second));
+    maxT = Math.min(maxT, Math.max(first, second));
+    if (minT >= maxT) return false;
+  }
+  return maxT > 0 && minT < 1 && minT < maxT;
+}
+function findRescueRoute(start, target, clearance = 6) {
+  const obstacles = platforms.map(platform => ({
+    left: platform.x - riderHalfWidth,
+    right: platform.x + platform.width + riderHalfWidth,
+    top: platform.y - riderHalfHeight,
+    bottom: platform.bottom + riderHalfHeight
+  }));
+  const nodes = [{ x: start.x, y: start.y }, { x: target.x, y: target.y }];
+  for (const rect of obstacles) {
+    const corners = [
+      { x: rect.left - clearance, y: rect.top - clearance },
+      { x: rect.right + clearance, y: rect.top - clearance },
+      { x: rect.right + clearance, y: rect.bottom + clearance },
+      { x: rect.left - clearance, y: rect.bottom + clearance }
+    ];
+    for (const corner of corners) {
+      if (!obstacles.some(other =>
+        corner.x > other.left && corner.x < other.right &&
+        corner.y > other.top && corner.y < other.bottom
+      )) nodes.push(corner);
+    }
+  }
+
+  const distances = nodes.map((_, index) => index === 0 ? 0 : Infinity);
+  const previous = nodes.map(() => -1);
+  const visited = nodes.map(() => false);
+  for (let step = 0; step < nodes.length; step++) {
+    let current = -1;
+    for (let i = 0; i < nodes.length; i++) {
+      if (!visited[i] && (current < 0 || distances[i] < distances[current])) current = i;
+    }
+    if (current < 0 || !Number.isFinite(distances[current])) break;
+    if (current === 1) break;
+    visited[current] = true;
+    for (let next = 1; next < nodes.length; next++) {
+      if (visited[next] || obstacles.some(rect => rescuePathBlocked(nodes[current], nodes[next], rect))) continue;
+      const distance = distances[current] + Math.hypot(
+        nodes[next].x - nodes[current].x,
+        nodes[next].y - nodes[current].y
+      );
+      if (distance < distances[next]) {
+        distances[next] = distance;
+        previous[next] = current;
+      }
+    }
+  }
+  if (!Number.isFinite(distances[1])) return [target];
+  const route = [];
+  for (let node = 1; node > 0; node = previous[node]) route.push(nodes[node]);
+  route.reverse();
+  return route;
+}
 function updateRescueBird(enemy) {
   const rescueBird = enemy.rescueBird;
   const hatchling = enemy.hatchling;
   if (!rescueBird) return;
   if (rescueBird.departing) {
+    const previousX = rescueBird.x;
+    const previousY = rescueBird.y;
     rescueBird.x += rescueBird.vx * flightMovementScale;
     rescueBird.y += rescueBird.vy * flightMovementScale;
+    collideWithPlatforms(rescueBird, previousX, previousY);
+    if (updateStuckRecovery(rescueBird, 1 / 60)) {
+      rescueBird.vx = -rescueBird.vx;
+      rescueBird.vy = rescueBird.y > canvas.height / 2 ? -1.2 : 1.2;
+    }
     rescueBird.animationClock += 1 / 60;
     if (rescueBird.x < -55 || rescueBird.x > canvas.width + 55 ||
         rescueBird.y < -55 || rescueBird.y > canvas.height + 55) enemy.rescueBird = null;
     return;
   }
   if (!hatchling) return;
-  const dx = hatchling.x - rescueBird.x;
   const targetY = hatchling.y - 28;
-  rescueBird.vx = clamp(dx * 0.025, -2.5, 2.5);
-  rescueBird.vy = clamp((targetY - rescueBird.y) * 0.04, -2, 2);
+  if (!rescueBird.route ||
+      Math.abs(rescueBird.routeTargetX - hatchling.x) > 8 ||
+      Math.abs(rescueBird.routeTargetY - targetY) > 8) {
+    rescueBird.routeClearance = rescueBird.routeClearance || 6;
+    rescueBird.route = findRescueRoute(rescueBird, { x: hatchling.x, y: targetY }, rescueBird.routeClearance);
+    rescueBird.routeIndex = 0;
+    rescueBird.routeTargetX = hatchling.x;
+    rescueBird.routeTargetY = targetY;
+  }
+  while (rescueBird.routeIndex < rescueBird.route.length - 1) {
+    const waypoint = rescueBird.route[rescueBird.routeIndex];
+    if (Math.hypot(waypoint.x - rescueBird.x, waypoint.y - rescueBird.y) >= 12) break;
+    rescueBird.routeIndex++;
+  }
+  const waypoint = rescueBird.route[rescueBird.routeIndex] || { x: hatchling.x, y: targetY };
+  const dx = hatchling.x - rescueBird.x;
+  const desiredVX = clamp((waypoint.x - rescueBird.x) * 0.08, -2.5, 2.5);
+  const desiredVY = clamp((waypoint.y - rescueBird.y) * 0.08, -2.1, 2.1);
+  rescueBird.vx = desiredVX;
+  rescueBird.vy = desiredVY;
+  const previousX = rescueBird.x;
+  const previousY = rescueBird.y;
   rescueBird.x += rescueBird.vx * flightMovementScale;
   rescueBird.y += rescueBird.vy * flightMovementScale;
+  const collision = collideWithPlatforms(rescueBird, previousX, previousY);
+  if (collision || updateStuckRecovery(rescueBird, 1 / 60)) {
+    rescueBird.route = null;
+    rescueBird.routeClearance = Math.min(28, (rescueBird.routeClearance || 6) + 6);
+  }
   rescueBird.animationClock += 1 / 60;
-  if (Math.abs(dx) < 24 && Math.abs(targetY - rescueBird.y) < 28 && !enemy.death) {
+  if (Math.abs(dx) < 24 && Math.abs(targetY - rescueBird.y) < 28 && !enemy.death &&
+      enemies.filter(candidate => candidate.active).length < maxActiveEnemies) {
     enemy.x = rescueBird.x;
     enemy.y = rescueBird.y + 12;
     enemy.vx = rescueBird.vx < 0 ? -1.5 : 1.5;
@@ -298,7 +497,6 @@ function updateRescueBird(enemy) {
     enemy.active = true;
     enemy.aiMode = 'patrol';
     enemy.patrolDirection = enemy.vx < 0 ? -1 : 1;
-    enemy.respawnTimer = null;
     enemy.hatchling = null;
     enemy.rescueBird = null;
   }
@@ -310,7 +508,7 @@ function updateHatchlingCollision(enemy) {
     Math.abs(player.y - hatchling.y) < riderHalfHeight + 12;
   if (!close) return;
   if (player.y < hatchling.y - 6) {
-    score += hatchlingScoreValue;
+    score += enemyScoreValue(enemy.type);
     enemy.hatchling = null;
     if (enemy.rescueBird) {
       const rescueBird = enemy.rescueBird;
@@ -318,7 +516,6 @@ function updateHatchlingCollision(enemy) {
       rescueBird.vx = rescueBird.direction * 2.5;
       rescueBird.vy = -0.35;
     }
-    enemy.respawnTimer = 1.8;
   } else {
     startDeath(player);
   }
@@ -332,19 +529,24 @@ function redirectEnemyPatrol(rider, direction = rider.patrolDirection) {
   rider.evadeCooldown = 2.2;
 }
 function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
+  let collision = null;
+  const wasOnPlatform = rider.onPlatform;
   rider.onPlatform = false;
   const overlapsHorizontally = p =>
     rider.x + riderHalfWidth > p.x && rider.x - riderHalfWidth < p.x + p.width;
   const overlapsVertically = p =>
     rider.y + riderHalfHeight > p.y && rider.y - riderHalfHeight < p.bottom;
+  const canWalkThroughSides = p => p.passSides && wasOnPlatform &&
+    Math.abs(previousY + riderHalfHeight - p.y) <= 3;
 
   if (checkSides && rider.vx > 0) {
     const platform = platforms.find(p =>
-      !p.passSides &&
+      !canWalkThroughSides(p) &&
       previousX + riderHalfWidth <= p.x && rider.x + riderHalfWidth >= p.x &&
       overlapsVertically(p)
     );
     if (platform) {
+      collision = { platform, side: 'left' };
       rider.x = platform.x - riderHalfWidth;
       rider.vx = -Math.max(0.9, Math.min(2.2, Math.abs(rider.vx) * 0.7));
       if (rider === player) rider.facingLeft = true;
@@ -353,11 +555,12 @@ function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
     }
   } else if (checkSides && rider.vx < 0) {
     const platform = platforms.find(p =>
-      !p.passSides &&
+      !canWalkThroughSides(p) &&
       previousX - riderHalfWidth >= p.x + p.width && rider.x - riderHalfWidth <= p.x + p.width &&
       overlapsVertically(p)
     );
     if (platform) {
+      collision = { platform, side: 'right' };
       rider.x = platform.x + platform.width + riderHalfWidth;
       rider.vx = Math.max(0.9, Math.min(2.2, Math.abs(rider.vx) * 0.7));
       if (rider === player) rider.facingLeft = false;
@@ -373,6 +576,7 @@ function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
       previousFeet <= p.y && feet >= p.y && overlapsHorizontally(p)
     );
     if (platform) {
+      collision = { platform, side: 'top' };
       rider.y = platform.y - riderHalfHeight;
       rider.vy = 0;
       rider.onPlatform = true;
@@ -391,6 +595,7 @@ function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
       previousHead >= p.bottom && head <= p.bottom && overlapsHorizontally(p)
     );
     if (platform) {
+      collision = { platform, side: 'bottom' };
       rider.y = platform.bottom + riderHalfHeight;
       rider.vy = Math.min(2.2, Math.max(0.9, Math.abs(rider.vy) * 0.5));
       if (rider !== player && Number.isFinite(rider.patrolCenterY)) {
@@ -404,6 +609,7 @@ function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
       bounceAnimation(rider);
     }
   }
+  return collision;
 }
 function updateAnimation(rider) {
   rider.animationClock += (1000 / 60) * (1 + rider.animBoost);
@@ -492,9 +698,24 @@ function updateEnemy(enemy) {
     enemy.y = canvas.height - riderHalfHeight; enemy.vy = -1.1;
   }
   if (enemy.y < riderHalfHeight) { enemy.y = riderHalfHeight; enemy.vy = 0; }
+  if (updateStuckRecovery(enemy, dt, true)) {
+    enemy.patrolDirection *= -1;
+    enemy.aiMode = 'patrol';
+    enemy.evadeTimer = 0;
+    enemy.evadeCooldown = 2.2;
+    enemy.vx = enemy.patrolDirection * 1.5;
+    const escapeDirection = enemy.y > canvas.height / 2 ? -1 : 1;
+    enemy.patrolCenterY = clamp(
+      enemy.y + escapeDirection * 70,
+      riderHalfHeight,
+      canvas.height - riderHalfHeight
+    );
+    enemy.vy = escapeDirection * 1.2;
+  }
   updateAnimation(enemy);
 }
 function update() {
+  gameTime += 1 / 60;
   const playerWasActive = !player.death;
   if (player.death) updateDeath(player);
   else if (player.spawn) updateSpawn();
@@ -502,15 +723,6 @@ function update() {
   for (const enemy of enemies) {
     if (enemy.death) updateDeath(enemy);
     else if (enemy.active) updateEnemy(enemy);
-    else if (enemy.spawnDelay !== null) {
-      enemy.spawnDelay -= 1 / 60;
-      if (enemy.spawnDelay <= 0) resetEnemy(enemy);
-    }
-
-    if (enemy.respawnTimer !== null) enemy.respawnTimer -= 1 / 60;
-    if (!enemy.active && !enemy.death && enemy.respawnTimer !== null && enemy.respawnTimer <= 0) {
-      resetEnemy(enemy);
-    }
     updateEgg(enemy);
     updateRescueBird(enemy);
     updateHatchlingCollision(enemy);
@@ -523,7 +735,7 @@ function update() {
     for (let j = i + 1; j < enemies.length; j++) {
       const second = enemies[j];
       if (!second.active || second.death) continue;
-      const close = Math.abs(first.x - second.x) < riderHalfWidth * 2 &&
+      const close = wrappedHorizontalGap(first.x, second.x) < riderHalfWidth * 2 &&
         Math.abs(first.y - second.y) < riderHalfHeight * 2;
       if (!close) continue;
       const winner = Math.abs(first.y - second.y) < 1
@@ -536,11 +748,11 @@ function update() {
   if (playerWasActive && !player.death && !player.spawn) {
     for (const enemy of enemies) {
       if (!enemy.active || enemy.death) continue;
-      const close = Math.abs(player.x - enemy.x) < riderHalfWidth * 2 &&
+      const close = wrappedHorizontalGap(player.x, enemy.x) < riderHalfWidth * 2 &&
         Math.abs(player.y - enemy.y) < riderHalfHeight * 2;
       if (!close) continue;
-      if (player.y <= enemy.y) {
-        score++;
+      if (player.y <= enemy.y + 1) {
+        score += enemyScoreValue(enemy.type);
         startDeath(enemy);
       } else {
         startDeath(player);
@@ -548,14 +760,22 @@ function update() {
       break;
     }
   }
+
+  while (enemySpawnQueue.length && enemySpawnQueue[0] <= gameTime) {
+    if (!spawnNextEnemy()) break;
+    enemySpawnQueue.shift();
+  }
+  if (gameTime >= nextIdleEnemySpawnAt) {
+    if (spawnNextEnemy()) nextIdleEnemySpawnAt = gameTime + idleEnemySpawnInterval;
+    else nextIdleEnemySpawnAt = gameTime + 1;
+  }
 }
-function drawAtlasSprite(frame, x, y, width, height, facingLeft = false, tint = 'none') {
+function drawAtlasSprite(frame, x, y, width, height, facingLeft = false) {
   if (!spriteSheet.complete || !spriteSheet.naturalWidth) return;
   const sourceWidth = frame.width || 14;
   const sourceHeight = frame.height || 20;
   ctx.save();
   ctx.imageSmoothingEnabled = false;
-  ctx.filter = tint;
   if (facingLeft) {
     ctx.translate(x * 2, 0);
     ctx.scale(-1, 1);
@@ -574,28 +794,18 @@ function drawPixelPattern(pattern, palette, centerX, centerY, pixelSize) {
   const height = pattern.length;
   const left = centerX - width * pixelSize / 2;
   const top = centerY - height * pixelSize / 2;
-  pattern.forEach((row, y) => {
-    [...row].forEach((pixel, x) => {
-      if (pixel === '.') return;
+  for (let y = 0; y < height; y++) {
+    const row = pattern[y];
+    for (let x = 0; x < width; x++) {
+      const pixel = row[x];
+      if (pixel === '.') continue;
       ctx.fillStyle = palette[pixel];
       ctx.fillRect(left + x * pixelSize, top + y * pixelSize, pixelSize, pixelSize);
-    });
-  });
+    }
+  }
 }
 function drawEgg(item) {
-  const eggPattern = [
-    '....DD....',
-    '...DCCCD..',
-    '..DCCCCCD.',
-    '.DCCCCCCCD',
-    '.DCCCCCCCD',
-    '.DCCYCCCCD',
-    '.DCCYCCCCD',
-    '..DCCCCCD.',
-    '...DCCCD..',
-    '....DD....'
-  ];
-  drawPixelPattern(eggPattern, { D: '#75411b', C: '#fff0ad', Y: '#dfb44a' }, item.x, item.y, 2);
+  drawPixelPattern(eggPattern, eggPalette, item.x, item.y, 2);
   if (item.landed && item.hatchTimer < 1.2) {
     ctx.fillStyle = '#75411b';
     ctx.fillRect(item.x - 1, item.y - 3, 2, 5);
@@ -653,6 +863,24 @@ function drawDeath(rider) {
     drawDeathBird(rider, death, death.direction < 0);
   }
 }
+function drawScore() {
+  if (!spriteSheet.complete || !spriteSheet.naturalWidth) return;
+  const digits = String(Math.max(0, Math.floor(score)));
+  const left = 270;
+  const top = 520;
+  const digitWidth = 10;
+  const digitHeight = 14;
+  const digitAdvance = 12;
+  ctx.save();
+  ctx.globalAlpha = 0.65;
+  ctx.imageSmoothingEnabled = false;
+  for (let i = 0; i < digits.length; i++) {
+    const digit = Number(digits[i]);
+    ctx.drawImage(spriteSheet, 2 + digit * 6, 299, 5, 7,
+      left + i * digitAdvance, top, digitWidth, digitHeight);
+  }
+  ctx.restore();
+}
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.imageSmoothingEnabled = false;
@@ -680,11 +908,26 @@ function draw() {
     if (enemy.hatchling) drawHatchling(enemy.hatchling);
     if (enemy.rescueBird) drawRescueBird(enemy.rescueBird);
   }
-  ctx.fillStyle = 'white'; ctx.fillText(`Score: ${score}`, 20, 28);
+  drawScore();
 }
-function loop() { update(); draw(); requestAnimationFrame(loop); }
+const simulationStep = 1 / 60;
+let previousFrameTime = 0;
+let accumulatedTime = 0;
+function loop(timestamp) {
+  if (!previousFrameTime) previousFrameTime = timestamp;
+  accumulatedTime += Math.min((timestamp - previousFrameTime) / 1000, 0.1);
+  previousFrameTime = timestamp;
+  while (accumulatedTime >= simulationStep) {
+    update();
+    accumulatedTime -= simulationStep;
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
 resetPlayer();
 player.spawn = { elapsed: 0 };
-loop();
+spawnNextEnemy();
+canvas.focus({ preventScroll: true });
+requestAnimationFrame(loop);
 </script>
 </html>

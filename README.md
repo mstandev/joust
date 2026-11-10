@@ -19,13 +19,14 @@ Then visit <http://localhost:8000/>.
 
 ## How it plays
 
-- The player and up to five enemy riders fly around a multi-level arena. Enemies enter from either side, at varied heights, and use one of two sprite types.
+- One enemy rider enters at the start. A replacement arrives 1 second after an enemy rider is defeated. If no enemy is defeated, another enemy appears every 50 seconds. Enemies enter from a randomly chosen side at a varied height; about two-thirds are green birds with red riders. At most 10 active or dying enemy riders are kept at once, with one slot reserved for a rescued hatchling; spawns wait when the limit is reached.
 - Birds wrap around the left and right edges of the arena. Platforms have solid sides and undersides; the middle platform can be crossed while walking.
-- In a rider collision, the higher bird wins. Equal-height enemy collisions are resolved at random.
-- The game continues after the player is defeated. The player loses 1 point per death, down to a minimum score of 0.
-- Defeated enemy riders drop an egg that falls toward a nearby platform. Catching an egg is worth 5 points. If left alone, it hatches after a short delay into a rider on foot.
-- A riderless enemy bird seeks hatched riders to pick them up. The player can stomp a hatchling for 7 points before it is rescued.
-- Defeating an enemy rider is worth 1 point.
+- In a player/enemy collision, the higher bird wins and an equal-height tie favors the player. Equal-height enemy collisions are resolved at random.
+- The game continues after the player is defeated. Each death costs 50 points, down to a minimum score of 0.
+- Defeating a Bounder (red rider) is worth 500 points. Defeating a Hunter (gray/silver rider) is worth 750 points. The 1,500-point Shadow Lord reward is reserved for a future blue-rider enemy type. Stomping a hatched rider awards the points for that rider's enemy type.
+- Eggs caught by the player are worth 250, 500, 750, then 1,000 points for the fourth and every later egg. Catching one before it lands adds a 500-point bonus. Egg order continues through the endless run and resets when the page is reloaded. If left alone, an egg hatches after a short delay into a rider on foot. An egg that falls into the bottom void is destroyed and queues another enemy spawn.
+- A riderless enemy bird seeks hatched riders to pick them up. The player can stomp a hatchling for the points awarded to that rider's enemy type before it is rescued.
+- A rescued hatchling can return to play as an enemy rider.
 
 ## Files
 

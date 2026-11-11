@@ -101,12 +101,12 @@ const eggPattern = [
 ];
 const eggPalette = { D: '#75411b', C: '#fff0ad', Y: '#dfb44a' };
 const player = {
-  x: 250, y: 344, vx: 0, vy: 0, onPlatform: false, facingLeft: false,
+  x: 250, y: 344, vx: 0, vy: 0, onPlatform: false, facingLeft: false, riderMounted: true,
   animationClock: 0, animBoost: 0, death: null, deathBirds: [], spawn: null
 };
 function createEnemy() {
   return {
-    x: enemySpawnX, y: 344, vx: -1.5, vy: 0, onPlatform: false,
+    x: enemySpawnX, y: 344, vx: -1.5, vy: 0, onPlatform: false, riderMounted: true,
     animationClock: 0, animBoost: 0, death: null, active: false,
     aiMode: 'enter', aiClock: 0, evadeTimer: 0, evadeCooldown: 0,
     spawnDirection: -1, patrolDirection: -1, patrolCenterY: 344, highPatroller: false,
@@ -129,6 +129,10 @@ addEventListener('blur', () => { keys = {}; });
 canvas.addEventListener('pointerdown', () => canvas.focus({ preventScroll: true }));
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 function enemyScoreValue(type) { return enemyScoreValues[type] || 0; }
+// Rescue birds are unmounted and stay noncombatants; only player/enemy rider entities pass this gate.
+function canFightAsRider(rider) {
+  return rider === player || (rider?.riderMounted === true && rider.active && !rider.death);
+}
 function queueEnemySpawn(delay = 0) {
   enemySpawnQueue.push(gameTime + delay);
   enemySpawnQueue.sort((first, second) => first - second);
@@ -193,7 +197,7 @@ function resetEnemy(enemy) {
       Math.random() * (canvas.height - riderHalfHeight * 2 - 110);
   enemy.vx = enemy.spawnDirection * 1.5;
   enemy.vy = 0; enemy.onPlatform = false; enemy.animBoost = 0;
-  enemy.animationClock = 0; enemy.death = null; enemy.active = true;
+  enemy.animationClock = 0; enemy.death = null; enemy.riderMounted = true; enemy.active = true;
   enemy.aiMode = 'enter'; enemy.aiClock = 0; enemy.evadeTimer = 0; enemy.evadeCooldown = 0;
   enemy.egg = null; enemy.hatchling = null;
 }
@@ -556,6 +560,7 @@ function updateRescueBird(enemy) {
     enemy.onPlatform = false;
     enemy.animationClock = 0;
     enemy.animBoost = 0;
+    enemy.riderMounted = true;
     enemy.active = true;
     enemy.aiMode = 'patrol';
     enemy.patrolDirection = enemy.vx < 0 ? -1 : 1;
@@ -573,7 +578,7 @@ function dismissHatchling(owner) {
 function updateHatchlingCollision(owner) {
   const hatchling = owner.hatchling;
   if (!hatchling) return;
-  if (!player.death && !player.spawn) {
+  if (!player.death && !player.spawn && canFightAsRider(player)) {
     const playerClose = Math.abs(player.x - hatchling.x) < riderHalfWidth + 10 &&
       Math.abs(player.y - hatchling.y) < riderHalfHeight + 12;
     if (playerClose) {
@@ -587,7 +592,7 @@ function updateHatchlingCollision(owner) {
     }
   }
 
-  const stompingEnemy = enemies.find(rider => rider !== owner && rider.active && !rider.death &&
+  const stompingEnemy = enemies.find(rider => rider !== owner && canFightAsRider(rider) &&
     wrappedHorizontalGap(rider.x, hatchling.x) < riderHalfWidth + 10 &&
     Math.abs(rider.y - hatchling.y) < riderHalfHeight + 12 &&
     rider.y < hatchling.y - 6
@@ -815,10 +820,10 @@ function update() {
 
   for (let i = 0; i < enemies.length; i++) {
     const first = enemies[i];
-    if (!first.active || first.death) continue;
+    if (!canFightAsRider(first)) continue;
     for (let j = i + 1; j < enemies.length; j++) {
       const second = enemies[j];
-      if (!second.active || second.death) continue;
+      if (!canFightAsRider(second)) continue;
       const close = wrappedHorizontalGap(first.x, second.x) < riderHalfWidth * 2 &&
         Math.abs(first.y - second.y) < riderHalfHeight * 2;
       if (!close) continue;
@@ -831,7 +836,7 @@ function update() {
 
   if (playerWasActive && !player.death && !player.spawn) {
     for (const enemy of enemies) {
-      if (!enemy.active || enemy.death) continue;
+      if (!canFightAsRider(enemy)) continue;
       const close = wrappedHorizontalGap(player.x, enemy.x) < riderHalfWidth * 2 &&
         Math.abs(player.y - enemy.y) < riderHalfHeight * 2;
       if (!close) continue;

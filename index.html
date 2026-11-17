@@ -13,6 +13,7 @@
     margin: 24px auto;
     background: #000;
     image-rendering: pixelated;
+    outline: none;
   }
   p { text-align: center; }
 </style>
@@ -29,13 +30,15 @@ const maxVerticalSpeed = 3.4;
 const flightMovementScale = 0.8;
 const steeringAcceleration = 0.22;
 const maxHorizontalSpeed = 2.8;
-const enemyScoreValues = { green: 500, alternate: 750, shadow: 1500 };
+const enemyScoreValues = { bounder: 500, hunter: 750, shadow: 1500 };
 const eggCatchScores = [250, 500, 750, 1000];
 const midairEggBonus = 500;
 const playerDeathPenalty = 50;
 const eggHatchDelay = 5;
 const eggRadius = 9;
 // Tan platform collision bounds mapped from the background crop to canvas pixels.
+// Platform order used by wave layouts: 1 top-left, 2 top-right, 3 upper-middle,
+// 4 left-middle, 5 right-upper, 6 right-middle, 7 the lower ledge, 8 the ground bridge.
 const platforms = [
   { x: 0,   y: 98,  bottom: 120, width: 120 }, { x: 924, y: 98,  bottom: 123, width: 176 },
   { x: 310, y: 132, bottom: 161, width: 328, passSides: true },
@@ -46,15 +49,30 @@ const platforms = [
 ];
 const riderHalfWidth = 23;
 const riderHalfHeight = 29;
-const upperPatrolMinY = riderHalfHeight + 4;
-const upperPatrolMaxY = platforms[0].y - riderHalfHeight - 4;
-const maxActiveEnemies = 10;
-const maxEnemyRecords = maxActiveEnemies * 2;
+const maxActiveEnemies = 24;
+const maxEnemyRecords = maxActiveEnemies * 4;
 const stuckProgressThreshold = 8;
 const stuckTimeout = 0.25;
-const enemyDeathReplacementDelays = [1, 3];
-const idleEnemySpawnInterval = 50;
-const enemySpawnX = canvas.width + riderHalfWidth;
+const portalPads = [
+  { x: 474, y: 132, platformIndex: 2 },
+  { x: 118, y: 294, platformIndex: 3 },
+  { x: 842, y: 269, platformIndex: 4 },
+  { x: 790, y: 501, platformIndex: 7 }
+];
+const standardPterodactylDelay = 36;
+const pterodactylRepeatDelay = 30;
+// Sprite sheet rows 10 and 11, column 2: flight cycle and sizzling death.
+const pterodactylFlightFrames = [
+  { x: 248, y: 333, width: 20, height: 6 },
+  { x: 270, y: 330, width: 19, height: 9 },
+  { x: 291, y: 333, width: 20, height: 6 },
+  { x: 313, y: 333, width: 23, height: 10 }
+];
+const pterodactylDeathFrames = [
+  { x: 248, y: 345, width: 22, height: 8 },
+  { x: 272, y: 345, width: 22, height: 8 },
+  { x: 296, y: 346, width: 22, height: 7 }
+];
 const riderSpriteWidth = 46;
 const riderSpriteHeight = 58;
 const playerStandFrames = [{ x: 247, y: 44, offsetY: 2 }];
@@ -65,15 +83,10 @@ const enemyFlightFrames = [247, 262].map(x => ({ x, y: 214, width: 14, height: 1
 const enemyDeathWalkFrames = [247, 262, 277, 292]
   .map(x => ({ x, y: 228, width: 14, height: 18 }));
 const enemyDeathFlightFrames = [247, 262].map(x => ({ x, y: 243, width: 14, height: 14 }));
-const alternateEnemyWalkFrames = [390, 405, 420, 435].map(x => ({ x, y: 63 }));
-const alternateEnemyFlightFrames = [390, 405]
-  .map(x => ({ x, y: 102, width: 14, height: 13, drawHeight: 43 }));
-const alternateEnemyDeathWalkFrames = [390, 405, 420, 435]
-  .map(x => ({ x, y: 140, width: 14, height: 18 }));
-const alternateEnemyDeathFlightFrames = [
-  { x: 390, y: 158, width: 13, height: 12 },
-  { x: 403, y: 158, width: 14, height: 12 }
-];
+// Mounted rider color references: red, gray, and blue, sharing the same pose.
+const mountedRiderPaletteCells = { bounder: 327, hunter: 342, shadow: 357 };
+const mountedTintMaps = {};
+const tintedFrameCache = new Map();
 // Row 7: the two riderless blue ostrich flight cels.
 const loneBirdFrames = [247, 262].map(x => ({ x, y: 156, width: 14, height: 14 }));
 const loneBirdWalkFrames = [
@@ -101,15 +114,15 @@ const eggPattern = [
 ];
 const eggPalette = { D: '#75411b', C: '#fff0ad', Y: '#dfb44a' };
 const player = {
-  x: 250, y: 344, vx: 0, vy: 0, onPlatform: false, facingLeft: false, riderMounted: true,
+  x: 250, y: 344, vx: 0, vy: 0, onPlatform: false, facingLeft: false,
   animationClock: 0, animBoost: 0, death: null, deathBirds: [], spawn: null
 };
 function createEnemy() {
   return {
-    x: enemySpawnX, y: 344, vx: -1.5, vy: 0, onPlatform: false, riderMounted: true,
+    x: 0, y: 344, vx: -1.5, vy: 0, onPlatform: false,
     animationClock: 0, animBoost: 0, death: null, active: false,
-    aiMode: 'enter', aiClock: 0, evadeTimer: 0, evadeCooldown: 0,
-    spawnDirection: -1, patrolDirection: -1, patrolCenterY: 344, highPatroller: false,
+    aiClock: 0, nextDecisionAt: 0,
+    spawnDirection: -1, patrolDirection: -1, patrolCenterY: 344,
     egg: null, hatchling: null, rescueBird: null
   };
 }
@@ -118,8 +131,18 @@ let nextHatchlingRiderFrame = 0;
 let score = 0, keys = {};
 let eggsCaughtThisRun = 0;
 let gameTime = 0;
-let enemySpawnQueue = [];
-let nextIdleEnemySpawnAt = idleEnemySpawnInterval;
+let currentWave = 1;
+let waveTime = 0;
+let waveQueue = [];
+let spawnedPadsByBatch = new Map();
+let waveStarted = false;
+let eggWave = false;
+let pterodactyls = [];
+let nextPterodactylAt = Infinity;
+let immediatePterodactyls = 0;
+let lavaActive = false;
+let trollReach = 0;
+let removedPlatforms = new Set();
 addEventListener('keydown', e => {
   keys[e.code] = true;
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'Space'].includes(e.code)) e.preventDefault();
@@ -129,13 +152,114 @@ addEventListener('blur', () => { keys = {}; });
 canvas.addEventListener('pointerdown', () => canvas.focus({ preventScroll: true }));
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 function enemyScoreValue(type) { return enemyScoreValues[type] || 0; }
-// Rescue birds are unmounted and stay noncombatants; only player/enemy rider entities pass this gate.
-function canFightAsRider(rider) {
-  return rider === player || (rider?.riderMounted === true && rider.active && !rider.death);
+function nextTier(type) {
+  return type === 'bounder' ? 'hunter' : type === 'hunter' ? 'shadow' : 'shadow';
 }
-function queueEnemySpawn(delay = 0) {
-  enemySpawnQueue.push(gameTime + delay);
-  enemySpawnQueue.sort((first, second) => first - second);
+function trollHandX() { return canvas.width / 2 + Math.sin(gameTime * 1.8) * 250; }
+function isInTrollReach(rider) {
+  return currentWave >= 4 && rider.y > canvas.height - trollReach - riderHalfHeight &&
+    wrappedHorizontalGap(rider.x, trollHandX()) < 34 + trollReach * 0.45;
+}
+function waveComposition(wave) {
+  const known = {
+    1: [3, 0, 0], 2: [4, 0, 0], 3: [6, 0, 0], 4: [3, 3, 0],
+    6: [3, 3, 0], 7: [2, 4, 0], 8: [0, 6, 0], 12: [2, 6, 0],
+    13: [0, 7, 0], 16: [0, 5, 1], 18: [0, 5, 1]
+  };
+  if (wave % 5 === 0) return { bounder: 0, hunter: 0, shadow: 0, eggs: 12 };
+  if (known[wave]) {
+    const [bounder, hunter, shadow] = known[wave];
+    return { bounder, hunter, shadow, eggs: 0 };
+  }
+  if (wave < 4) return { bounder: 2 + wave, hunter: 0, shadow: 0, eggs: 0 };
+  if (wave <= 12) {
+    const total = wave === 9 || wave === 11 ? 7 : 6;
+    return { bounder: 0, hunter: total, shadow: 0, eggs: 0 };
+  }
+  if (wave < 16) return { bounder: 0, hunter: 7 + (wave - 13), shadow: 0, eggs: 0 };
+  if (wave < 37) {
+    const total = Math.min(12, 6 + Math.floor((wave - 16) / 3));
+    const shadow = Math.max(1, Math.round(total * (wave - 15) / 22));
+    return { bounder: 0, hunter: total - shadow, shadow, eggs: 0 };
+  }
+  return { bounder: 0, hunter: 0, shadow: Math.min(24, 8 + Math.floor((wave - 37) / 3)), eggs: 0 };
+}
+function isPterodactylWave(wave) { return wave >= 8 && (wave - 8) % 5 === 0; }
+function immediatePterodactylCount(wave) {
+  if (!isPterodactylWave(wave)) return 0;
+  if (wave === 18) return 2;
+  return Math.min(3, wave >= 33 ? 3 : wave >= 23 ? 2 : 1);
+}
+function startWave(wave) {
+  currentWave = wave;
+  waveTime = 0;
+  waveStarted = true;
+  eggWave = wave % 5 === 0;
+  waveQueue = [];
+  spawnedPadsByBatch = new Map();
+  pterodactyls = pterodactyls.filter(p => !p.departing);
+  removedPlatforms = new Set();
+  lavaActive = wave >= 3;
+  trollReach = wave >= 4 ? Math.min(90, 18 + Math.max(0, wave - 4) * 1.1) : 0;
+  if (!eggWave) {
+    if (wave === 6) removedPlatforms.add(2); // Platform 3
+    else if (wave >= 7 && wave <= 12) [0, 1, 2].forEach(index => removedPlatforms.add(index));
+    else if (wave === 13) [0, 1, 2, 3].forEach(index => removedPlatforms.add(index));
+    else if (wave >= 14) [0, 1, 2, 3, 4, 5].forEach(index => removedPlatforms.add(index));
+  }
+  const composition = waveComposition(wave);
+  if (composition.eggs) {
+    const eggPlatforms = platforms.filter((_, index) => !removedPlatforms.has(index));
+    const positions = Array.from({ length: 12 }, (_, index) => {
+      const platform = eggPlatforms[index % eggPlatforms.length];
+      const slot = Math.floor(index / eggPlatforms.length);
+      const slotsOnPlatform = Math.ceil(12 / eggPlatforms.length);
+      return [platform.x + (slot + 1) * platform.width / (slotsOnPlatform + 1), platform.y];
+    });
+    for (let index = 0; index < positions.length; index++) {
+      const owner = enemies.find(item => !item.active && !item.death &&
+        !item.egg && !item.hatchling && !item.rescueBird) || createEnemy();
+      if (!enemies.includes(owner)) enemies.push(owner);
+      owner.type = wave >= 60 ? 'shadow' : wave >= 16 ? 'shadow' : 'bounder';
+      const targetPlatform = platforms.find(platform => Math.abs(platform.y - positions[index][1]) < 1) ||
+        platforms[platforms.length - 1];
+      owner.egg = {
+        x: positions[index][0], y: positions[index][1] - eggRadius,
+        vx: 0, vy: 0, landed: true, platform: null,
+        targetPlatform, targetX: positions[index][0],
+        hatchTimer: eggHatchDelay
+      };
+    }
+  } else {
+    const spawnTypes = [
+      ...Array(composition.bounder).fill('bounder'),
+      ...Array(composition.hunter).fill('hunter'),
+      ...Array(composition.shadow).fill('shadow')
+    ];
+    let scheduled = 0;
+    let batch = 0;
+    let time = isPterodactylWave(wave) ? 0 : 1.2;
+    const interval = Math.max(0.12, 2.7 - (wave - 1) * 0.09);
+    while (scheduled < spawnTypes.length) {
+      const batchSize = wave >= 40 ? 4 : wave >= 20 ? 2 : 1;
+      const usedPads = new Set();
+      for (let index = 0; index < batchSize && scheduled < spawnTypes.length; index++) {
+        let pad = Math.floor(Math.random() * portalPads.length);
+        while (usedPads.has(pad)) pad = (pad + 1) % portalPads.length;
+        usedPads.add(pad);
+        const type = spawnTypes[scheduled];
+        waveQueue.push({ at: time, pad, type, batch });
+        scheduled++;
+      }
+      batch++;
+      time += interval;
+    }
+  }
+  immediatePterodactyls = immediatePterodactylCount(wave);
+  nextPterodactylAt = immediatePterodactyls ? Infinity : standardPterodactylDelay;
+}
+function countWaveThreats() {
+  return enemies.filter(enemy => enemy.active || enemy.death || enemy.egg || enemy.hatchling || enemy.rescueBird).length;
 }
 function nextEggCatchScore() {
   const points = eggCatchScores[Math.min(eggsCaughtThisRun, eggCatchScores.length - 1)];
@@ -168,10 +292,12 @@ function updateStuckRecovery(bird, dt, wraps = false) {
   return true;
 }
 function resetPlayer() {
-  const points = platforms.map(platform => ({
-    x: platform.x + platform.width / 2,
-    y: platform.y - riderHalfHeight - 1
-  }));
+  const points = platforms.map((platform, index) => ({ platform, index }))
+    .filter(({ index }) => !removedPlatforms.has(index))
+    .map(({ platform }) => ({
+      x: platform.x + platform.width / 2,
+      y: platform.y - riderHalfHeight - 1
+    }));
   const safePoints = points.filter(point =>
     enemies.filter(enemy => enemy.active).every(enemy =>
       Math.hypot(point.x - enemy.x, point.y - enemy.y) > 180));
@@ -180,30 +306,30 @@ function resetPlayer() {
   player.x = spawnPoint.x; player.y = spawnPoint.y; player.vx = 0; player.vy = 0;
   player.onPlatform = true; player.facingLeft = false; player.animBoost = 0; player.death = null;
 }
-function resetEnemy(enemy) {
-  enemy.type = Math.random() < 2 / 3 ? 'green' : 'alternate';
-  const fromLeft = Math.random() < 0.5;
-  enemy.spawnDirection = fromLeft ? 1 : -1;
+function resetEnemy(enemy, type, padIndex = 0) {
+  enemy.type = type;
+  const pad = portalPads[padIndex % portalPads.length];
+  enemy.spawnDirection = pad.x < canvas.width / 2 ? 1 : -1;
   enemy.patrolDirection = enemy.spawnDirection;
-  enemy.x = fromLeft ? -riderHalfWidth : enemySpawnX;
-  enemy.y = riderHalfHeight + Math.random() * (canvas.height - riderHalfHeight * 2);
+  enemy.x = pad.x;
+  enemy.y = pad.y - riderHalfHeight;
   enemy.stuckX = enemy.x;
   enemy.stuckY = enemy.y;
   enemy.stuckTimer = 0;
-  enemy.highPatroller = Math.random() < 0.15;
-  enemy.patrolCenterY = enemy.highPatroller
-    ? upperPatrolMinY + 8 + Math.random() * 8
-    : riderHalfHeight + 55 +
-      Math.random() * (canvas.height - riderHalfHeight * 2 - 110);
+  enemy.patrolCenterY = clamp(enemy.y + (Math.random() - 0.5) * 100,
+    riderHalfHeight, canvas.height - riderHalfHeight);
   enemy.vx = enemy.spawnDirection * 1.5;
-  enemy.vy = 0; enemy.onPlatform = false; enemy.animBoost = 0;
-  enemy.animationClock = 0; enemy.death = null; enemy.riderMounted = true; enemy.active = true;
-  enemy.aiMode = 'enter'; enemy.aiClock = 0; enemy.evadeTimer = 0; enemy.evadeCooldown = 0;
+  const padPlatformGone = removedPlatforms.has(pad.platformIndex);
+  enemy.vy = padPlatformGone ? -1.3 : 0;
+  enemy.onPlatform = false; enemy.animBoost = 0;
+  enemy.animationClock = 0; enemy.death = null; enemy.active = true;
+  enemy.aiClock = 0; enemy.nextDecisionAt = 0;
   enemy.egg = null; enemy.hatchling = null;
 }
-function spawnNextEnemy() {
-  // Reserve the final slot for a riderless bird picking up a hatched rider.
-  if (enemies.filter(candidate => candidate.active).length >= maxActiveEnemies - 1) return false;
+function spawnNextEnemy(type, padIndex = 0, excludedPads = new Set()) {
+  if (enemies.filter(candidate => candidate.active).length >= maxActiveEnemies) return false;
+  const padChoice = chooseSpawnPad(padIndex, excludedPads);
+  if (!padChoice) return false;
   let enemy = enemies.find(candidate =>
     !candidate.active && !candidate.death && !candidate.egg &&
     !candidate.hatchling && !candidate.rescueBird
@@ -213,12 +339,26 @@ function spawnNextEnemy() {
     enemy = createEnemy();
     enemies.push(enemy);
   }
-  resetEnemy(enemy);
-  return true;
+  resetEnemy(enemy, type, padChoice.index);
+  return { padIndex: padChoice.index };
+}
+function playerBlocksPad(pad) {
+  return !player.death && !player.spawn && player.onPlatform &&
+    wrappedHorizontalGap(player.x, pad.x) < 34 &&
+    Math.abs(player.y + riderHalfHeight - pad.y) < 8;
+}
+function chooseSpawnPad(preferredIndex, excludedPads = new Set()) {
+  const available = portalPads.map((pad, index) => ({ pad, index }))
+    .filter(({ index }) => !excludedPads.has(index))
+    .filter(({ pad }) => !playerBlocksPad(pad));
+  if (!available.length) return null;
+  const preferred = available.find(item => item.index === preferredIndex);
+  return preferred || available[Math.floor(Math.random() * available.length)];
 }
 function dropEgg(enemy, x, y) {
-  const platformsBelow = platforms.filter(platform => platform.y >= y + eggRadius);
-  const candidates = platformsBelow.length ? platformsBelow : platforms;
+  const activePlatforms = platforms.filter((_, index) => !removedPlatforms.has(index));
+  const platformsBelow = activePlatforms.filter(platform => platform.y >= y + eggRadius);
+  const candidates = platformsBelow.length ? platformsBelow : activePlatforms;
   const targetPlatform = candidates.reduce((nearest, platform) => {
     const targetX = clamp(x, platform.x + eggRadius, platform.x + platform.width - eggRadius);
     const distance = Math.hypot(targetX - x, platform.y - y);
@@ -249,8 +389,6 @@ function startDeath(rider) {
   };
   if (rider !== player) {
     dropEgg(rider, rider.x, rider.y);
-    for (const delay of enemyDeathReplacementDelays) queueEnemySpawn(delay);
-    nextIdleEnemySpawnAt = gameTime + idleEnemySpawnInterval;
   }
   rider.onPlatform = false;
 }
@@ -382,7 +520,7 @@ function hatchEgg(enemy) {
   enemy.rescueBird = {
     x: fromLeft ? -30 : canvas.width + 30,
     y: clamp(enemy.hatchling.y - 170, 50, canvas.height - 80),
-    vx: fromLeft ? 1.8 : -1.8, vy: 0, type: enemy.type,
+    vx: fromLeft ? 1.8 : -1.8, vy: 0, type: nextTier(enemy.type),
     direction: fromLeft ? 1 : -1, animationClock: 0, animBoost: 0
   };
   enemy.egg = null;
@@ -395,22 +533,14 @@ function updateEgg(enemy) {
     enemy.egg = null;
     return;
   }
-  const enemyCollector = enemies.find(other =>
-    other.active && !other.death &&
-    Math.hypot(other.x - egg.x, other.y - egg.y) < 28
-  );
-  if (enemyCollector) {
-    enemy.egg = null;
-    return;
-  }
-
   if (!egg.landed) {
     const previousY = egg.y;
     egg.vy = Math.min(4.2, egg.vy + gravity);
     egg.vx = clamp((egg.targetX - egg.x) * 0.08, -3, 3);
     egg.x += egg.vx;
     egg.y += egg.vy;
-    const platform = platforms.find(p =>
+    const platform = platforms.find((p, index) =>
+      !removedPlatforms.has(index) &&
       previousY + eggRadius <= p.y && egg.y + eggRadius >= p.y &&
       egg.x + eggRadius > p.x && egg.x - eggRadius < p.x + p.width
     );
@@ -421,7 +551,6 @@ function updateEgg(enemy) {
       egg.platform = platform;
     } else if (egg.y >= canvas.height - eggRadius) {
       enemy.egg = null;
-      queueEnemySpawn();
       return;
     }
   } else {
@@ -555,14 +684,13 @@ function updateRescueBird(enemy) {
       enemies.filter(candidate => candidate.active).length < maxActiveEnemies) {
     enemy.x = rescueBird.x;
     enemy.y = rescueBird.y + 12;
+    enemy.type = rescueBird.type;
     enemy.vx = rescueBird.vx < 0 ? -1.5 : 1.5;
     enemy.vy = -0.35;
     enemy.onPlatform = false;
     enemy.animationClock = 0;
     enemy.animBoost = 0;
-    enemy.riderMounted = true;
     enemy.active = true;
-    enemy.aiMode = 'patrol';
     enemy.patrolDirection = enemy.vx < 0 ? -1 : 1;
     enemy.hatchling = null;
     enemy.rescueBird = null;
@@ -578,7 +706,7 @@ function dismissHatchling(owner) {
 function updateHatchlingCollision(owner) {
   const hatchling = owner.hatchling;
   if (!hatchling) return;
-  if (!player.death && !player.spawn && canFightAsRider(player)) {
+  if (!player.death && !player.spawn) {
     const playerClose = Math.abs(player.x - hatchling.x) < riderHalfWidth + 10 &&
       Math.abs(player.y - hatchling.y) < riderHalfHeight + 12;
     if (playerClose) {
@@ -592,7 +720,7 @@ function updateHatchlingCollision(owner) {
     }
   }
 
-  const stompingEnemy = enemies.find(rider => rider !== owner && canFightAsRider(rider) &&
+  const stompingEnemy = enemies.find(rider => rider !== owner && rider.active && !rider.death &&
     wrappedHorizontalGap(rider.x, hatchling.x) < riderHalfWidth + 10 &&
     Math.abs(rider.y - hatchling.y) < riderHalfHeight + 12 &&
     rider.y < hatchling.y - 6
@@ -603,9 +731,6 @@ function bounceAnimation(rider) { rider.animBoost = Math.max(rider.animBoost, 2.
 function redirectEnemyPatrol(rider, direction = rider.patrolDirection) {
   if (rider === player || !Number.isFinite(rider.patrolCenterY)) return;
   rider.patrolDirection = direction;
-  rider.aiMode = 'patrol';
-  rider.evadeTimer = 0;
-  rider.evadeCooldown = 2.2;
 }
 function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
   let collision = null;
@@ -618,8 +743,9 @@ function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
   const canWalkThroughSides = p => p.passSides && wasOnPlatform &&
     Math.abs(previousY + riderHalfHeight - p.y) <= 3;
 
+  const solidPlatforms = platforms.filter((_, index) => !removedPlatforms.has(index));
   if (checkSides && rider.vx > 0) {
-    const platform = platforms.find(p =>
+    const platform = solidPlatforms.find(p =>
       !canWalkThroughSides(p) &&
       previousX + riderHalfWidth <= p.x && rider.x + riderHalfWidth >= p.x &&
       overlapsVertically(p)
@@ -633,7 +759,7 @@ function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
       bounceAnimation(rider);
     }
   } else if (checkSides && rider.vx < 0) {
-    const platform = platforms.find(p =>
+    const platform = solidPlatforms.find(p =>
       !canWalkThroughSides(p) &&
       previousX - riderHalfWidth >= p.x + p.width && rider.x - riderHalfWidth <= p.x + p.width &&
       overlapsVertically(p)
@@ -651,7 +777,7 @@ function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
   if (rider.vy >= 0) {
     const previousFeet = previousY + riderHalfHeight;
     const feet = rider.y + riderHalfHeight;
-    const platform = platforms.find(p =>
+    const platform = solidPlatforms.find(p =>
       previousFeet <= p.y && feet >= p.y && overlapsHorizontally(p)
     );
     if (platform) {
@@ -670,7 +796,7 @@ function collideWithPlatforms(rider, previousX, previousY, checkSides = true) {
   } else {
     const previousHead = previousY - riderHalfHeight;
     const head = rider.y - riderHalfHeight;
-    const platform = platforms.find(p =>
+    const platform = solidPlatforms.find(p =>
       previousHead >= p.bottom && head <= p.bottom && overlapsHorizontally(p)
     );
     if (platform) {
@@ -699,7 +825,7 @@ function updatePlayer() {
   if (keys.ArrowLeft) { player.vx -= steeringAcceleration; player.facingLeft = true; }
   if (keys.ArrowRight) { player.vx += steeringAcceleration; player.facingLeft = false; }
   if (keys.Space || keys.ArrowUp) player.vy -= flapLift;
-  player.vx *= 0.96;
+  if (player.onPlatform) player.vx *= 0.96;
   player.vy += gravity;
   player.vx = Math.max(-maxHorizontalSpeed, Math.min(maxHorizontalSpeed, player.vx));
   player.vy = Math.max(-maxVerticalSpeed, Math.min(maxVerticalSpeed, player.vy));
@@ -712,61 +838,37 @@ function updatePlayer() {
   else if (player.x > canvas.width + riderHalfWidth) player.x = -riderHalfWidth;
   collideWithPlatforms(player, previousPlayerX, previousPlayerY, !playerWrapped);
   if (player.y > canvas.height - riderHalfHeight) {
-    player.y = canvas.height - riderHalfHeight; player.vy = -1.1;
+    player.y = canvas.height - riderHalfHeight;
+    if (lavaActive) startDeath(player); else player.vy = -1.1;
   }
   if (player.y < riderHalfHeight) { player.y = riderHalfHeight; player.vy = 0; }
+  if (lavaActive && isInTrollReach(player)) startDeath(player);
   updateAnimation(player);
 }
 function updateEnemy(enemy) {
   const dt = 1 / 60;
   enemy.aiClock += dt;
-  enemy.evadeCooldown = Math.max(0, enemy.evadeCooldown - dt);
   const playerAvailable = !player.death && !player.spawn;
   let targetDx = player.x - enemy.x;
   if (targetDx > canvas.width / 2) targetDx -= canvas.width;
   else if (targetDx < -canvas.width / 2) targetDx += canvas.width;
-
-  if (enemy.aiMode === 'enter') {
-    const enteredScreen = enemy.spawnDirection > 0
-      ? enemy.x > riderHalfWidth
-      : enemy.x < canvas.width - riderHalfWidth;
-    if (enteredScreen) enemy.aiMode = 'patrol';
-  } else if (!playerAvailable) {
-    enemy.aiMode = 'patrol';
-  } else {
-    const playerAboveAndClose = targetDx < 165 && targetDx > -165 &&
-      player.y < enemy.y - 18 && Math.abs(player.y - enemy.y) < 125;
-    if (enemy.aiMode === 'evade') {
-      enemy.evadeTimer -= dt;
-      if (enemy.evadeTimer <= 0) {
-        enemy.aiMode = 'patrol';
-        enemy.evadeCooldown = 2.2;
-      }
-    } else if (playerAboveAndClose && enemy.evadeCooldown <= 0) {
-      enemy.aiMode = 'evade';
-      enemy.evadeTimer = 0.85;
-    }
+  if (enemy.aiClock >= (enemy.nextDecisionAt || 0)) {
+    enemy.nextDecisionAt = enemy.aiClock + 1.4 + Math.random() * 2.2;
+    if (enemy.type === 'bounder' && Math.random() < 0.6) enemy.patrolDirection *= -1;
   }
-
-  let desiredVX, targetY;
-  const patrolRange = enemy.highPatroller
-    ? { min: upperPatrolMinY, max: upperPatrolMaxY, amplitude: 18 }
-    : { min: riderHalfHeight, max: canvas.height - riderHalfHeight, amplitude: 55 };
-  const patrolY = clamp(
-    enemy.patrolCenterY + Math.sin(enemy.aiClock * 1.4) * patrolRange.amplitude,
-    patrolRange.min,
-    patrolRange.max
-  );
-  if (enemy.aiMode === 'evade') {
-    const playerSide = targetDx === 0 ? Math.sign(enemy.vx) : Math.sign(targetDx);
-    desiredVX = -playerSide * 1.65;
-    targetY = patrolY;
-  } else {
-    desiredVX = enemy.patrolDirection * 1.35;
-    targetY = patrolY;
+  const baseY = clamp(enemy.patrolCenterY + Math.sin(enemy.aiClock * 1.1) * 46,
+    riderHalfHeight, canvas.height - riderHalfHeight - 12);
+  let desiredVX = enemy.patrolDirection * (enemy.type === 'shadow' ? 1.9 : 1.35);
+  let targetY = baseY;
+  if (playerAvailable && enemy.type === 'hunter') {
+    targetY = clamp(player.y - 38, riderHalfHeight, canvas.height - riderHalfHeight - 12);
+    desiredVX = Math.sign(targetDx || enemy.patrolDirection) * 1.35;
+  } else if (playerAvailable && enemy.type === 'shadow') {
+    targetY = clamp(player.y - 78, riderHalfHeight, canvas.height - riderHalfHeight - 12);
+    desiredVX = Math.sign(targetDx || enemy.patrolDirection) * 1.85;
   }
-  enemy.vx += (desiredVX - enemy.vx) * 0.055;
-  enemy.vx = clamp(enemy.vx, -2.05, 2.05);
+  enemy.vx += (desiredVX - enemy.vx) * (enemy.type === 'shadow' ? 0.075 : 0.045);
+  enemy.vx = clamp(enemy.vx, -2.4, 2.4);
 
   const previousEnemyX = enemy.x, previousEnemyY = enemy.y;
   const flightScale = enemy.onPlatform ? 1 : flightMovementScale;
@@ -774,21 +876,21 @@ function updateEnemy(enemy) {
   const enemyWrapped = enemy.x < -riderHalfWidth || enemy.x > canvas.width + riderHalfWidth;
   if (enemy.x < -riderHalfWidth) enemy.x = canvas.width + riderHalfWidth;
   else if (enemy.x > canvas.width + riderHalfWidth) enemy.x = -riderHalfWidth;
-  if (targetY < enemy.y - 10) enemy.vy -= flapLift * 0.82;
+  const altitudeUrgency = enemy.type === 'shadow' ? 1.1 : enemy.type === 'hunter' ? 0.75 : 0.35;
+  if (targetY < enemy.y - 10) enemy.vy -= flapLift * altitudeUrgency;
   enemy.vy += gravity;
   enemy.vy *= 0.96;
   enemy.vy = clamp(enemy.vy, -maxVerticalSpeed, maxVerticalSpeed);
   enemy.y += enemy.vy * flightScale;
   collideWithPlatforms(enemy, previousEnemyX, previousEnemyY, !enemyWrapped);
   if (enemy.y > canvas.height - riderHalfHeight) {
-    enemy.y = canvas.height - riderHalfHeight; enemy.vy = -1.1;
+    enemy.y = canvas.height - riderHalfHeight;
+    if (lavaActive) startDeath(enemy); else enemy.vy = -1.1;
   }
   if (enemy.y < riderHalfHeight) { enemy.y = riderHalfHeight; enemy.vy = 0; }
+  if (lavaActive && isInTrollReach(enemy)) startDeath(enemy);
   if (updateStuckRecovery(enemy, dt, true)) {
     enemy.patrolDirection *= -1;
-    enemy.aiMode = 'patrol';
-    enemy.evadeTimer = 0;
-    enemy.evadeCooldown = 2.2;
     enemy.vx = enemy.patrolDirection * 1.5;
     const escapeDirection = enemy.y > canvas.height / 2 ? -1 : 1;
     enemy.patrolCenterY = clamp(
@@ -799,6 +901,94 @@ function updateEnemy(enemy) {
     enemy.vy = escapeDirection * 1.2;
   }
   updateAnimation(enemy);
+}
+function bounceFromTie(first, second) {
+  const direction = first.x <= second.x ? -1 : 1;
+  first.vx = direction * Math.max(1.2, Math.abs(first.vx));
+  second.vx = -direction * Math.max(1.2, Math.abs(second.vx));
+  first.vy = Math.min(first.vy, -1.4);
+  second.vy = Math.min(second.vy, -1.4);
+  first.x += direction * 3;
+  second.x -= direction * 3;
+  bounceAnimation(first);
+  bounceAnimation(second);
+}
+function spawnPterodactyl() {
+  if (pterodactyls.filter(item => !item.departing && !item.dying).length >= 3) return;
+  const direction = Math.random() < 0.5 ? 1 : -1;
+  pterodactyls.push({
+    x: direction > 0 ? -40 : canvas.width + 40,
+    y: 80 + Math.random() * 170,
+    vx: direction * (2.4 + Math.min(1.8, currentWave * 0.025)),
+    vy: 0, direction, animationClock: 0, departing: false,
+    dying: false, deathElapsed: 0
+  });
+}
+function updatePterodactyls() {
+  const threatsRemain = countWaveThreats() > 0 || waveQueue.length > 0;
+  for (let index = pterodactyls.length - 1; index >= 0; index--) {
+    const bird = pterodactyls[index];
+    if (bird.dying) {
+      bird.deathElapsed += 1 / 60;
+      if (bird.deathElapsed >= 0.72) pterodactyls.splice(index, 1);
+      continue;
+    }
+    if (!threatsRemain) bird.departing = true;
+    bird.animationClock += 1 / 60;
+    bird.x += bird.vx;
+    if (bird.departing && (bird.x < -60 || bird.x > canvas.width + 60)) {
+      pterodactyls.splice(index, 1);
+      continue;
+    }
+    for (const rider of [player, ...enemies.filter(enemy => enemy.active && !enemy.death)]) {
+      if (rider.death || rider.spawn) continue;
+      if (wrappedHorizontalGap(rider.x, bird.x) > 34 || Math.abs(rider.y - bird.y) > 32) continue;
+      const facing = rider === player ? (player.facingLeft ? -1 : 1) : rider.vx < 0 ? -1 : 1;
+      const lanceTipX = rider.x + facing * 28;
+      const lanceTipY = rider.y - riderHalfHeight;
+      const mouthX = bird.x + bird.direction * 18;
+      const mouthY = bird.y - 7;
+      const preciseMouthHit = wrappedHorizontalGap(lanceTipX, mouthX) < 9 &&
+        Math.abs(lanceTipY - mouthY) < 12;
+      if (preciseMouthHit) {
+        bird.dying = true;
+        bird.deathElapsed = 0;
+        bird.vx = 0;
+        break;
+      } else startDeath(rider);
+    }
+  }
+}
+function updateWaveProgression() {
+  if (!waveStarted) startWave(1);
+  waveTime += 1 / 60;
+  if (immediatePterodactyls > 0) {
+    while (immediatePterodactyls > 0) {
+      spawnPterodactyl();
+      immediatePterodactyls--;
+    }
+    nextPterodactylAt = waveTime + pterodactylRepeatDelay;
+  }
+  if (nextPterodactylAt <= waveTime) {
+    spawnPterodactyl();
+    nextPterodactylAt = waveTime + pterodactylRepeatDelay;
+  }
+  while (waveQueue.length && waveQueue[0].at <= waveTime) {
+    const next = waveQueue[0];
+    const usedPads = spawnedPadsByBatch.get(next.batch) || new Set();
+    const spawned = spawnNextEnemy(next.type, next.pad, usedPads);
+    if (!spawned) break;
+    usedPads.add(spawned.padIndex);
+    spawnedPadsByBatch.set(next.batch, usedPads);
+    waveQueue.shift();
+    if (!waveQueue.some(item => item.batch === next.batch)) spawnedPadsByBatch.delete(next.batch);
+  }
+  if (waveQueue.length || countWaveThreats() > 0) return;
+  for (const bird of pterodactyls) bird.departing = true;
+  if (!pterodactyls.length) {
+    if (currentWave === 2) score += 3000;
+    startWave(currentWave + 1);
+  }
 }
 function update() {
   gameTime += 1 / 60;
@@ -820,27 +1010,27 @@ function update() {
 
   for (let i = 0; i < enemies.length; i++) {
     const first = enemies[i];
-    if (!canFightAsRider(first)) continue;
+    if (!first.active || first.death) continue;
     for (let j = i + 1; j < enemies.length; j++) {
       const second = enemies[j];
-      if (!canFightAsRider(second)) continue;
+      if (!second.active || second.death) continue;
       const close = wrappedHorizontalGap(first.x, second.x) < riderHalfWidth * 2 &&
         Math.abs(first.y - second.y) < riderHalfHeight * 2;
       if (!close) continue;
-      const winner = Math.abs(first.y - second.y) < 1
-        ? (Math.random() < 0.5 ? first : second)
-        : first.y < second.y ? first : second;
-      startDeath(winner === first ? second : first);
+      if (Math.abs(first.y - second.y) < 1) bounceFromTie(first, second);
+      else startDeath(first.y < second.y ? second : first);
     }
   }
 
   if (playerWasActive && !player.death && !player.spawn) {
     for (const enemy of enemies) {
-      if (!canFightAsRider(enemy)) continue;
+      if (!enemy.active || enemy.death) continue;
       const close = wrappedHorizontalGap(player.x, enemy.x) < riderHalfWidth * 2 &&
         Math.abs(player.y - enemy.y) < riderHalfHeight * 2;
       if (!close) continue;
-      if (player.y <= enemy.y + 1) {
+      if (Math.abs(player.y - enemy.y) < 1) {
+        bounceFromTie(player, enemy);
+      } else if (player.y < enemy.y) {
         score += enemyScoreValue(enemy.type);
         startDeath(enemy);
       } else {
@@ -850,14 +1040,77 @@ function update() {
     }
   }
 
-  while (enemySpawnQueue.length && enemySpawnQueue[0] <= gameTime) {
-    if (!spawnNextEnemy()) break;
-    enemySpawnQueue.shift();
+  updatePterodactyls();
+  updateWaveProgression();
+}
+function getMountedRiderTintMap(type) {
+  if (!['hunter', 'shadow'].includes(type)) return null;
+  if (mountedTintMaps[type]) return mountedTintMaps[type];
+  if (!spriteSheet.complete || !spriteSheet.naturalWidth) return null;
+  try {
+    const sampleCell = sourceX => {
+      const sample = document.createElement('canvas');
+      sample.width = 14; sample.height = 20;
+      const sampleCtx = sample.getContext('2d', { willReadFrequently: true });
+      sampleCtx.drawImage(spriteSheet, sourceX, 193, 14, 20, 0, 0, 14, 20);
+      return sampleCtx.getImageData(0, 0, 14, 20).data;
+    };
+    const red = sampleCell(mountedRiderPaletteCells.bounder);
+    const target = sampleCell(mountedRiderPaletteCells[type]);
+    const pairCounts = new Map();
+    for (let y = 0; y < 6; y++) {
+      for (let x = 2; x <= 7; x++) {
+        const offset = (y * 14 + x) * 4;
+        if (!red[offset + 3] || !target[offset + 3]) continue;
+        const from = `${red[offset]},${red[offset + 1]},${red[offset + 2]}`;
+        const to = `${target[offset]},${target[offset + 1]},${target[offset + 2]}`;
+        if (from === to) continue;
+        const key = `${from}|${to}`;
+        pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+      }
+    }
+    const bestPairs = new Map();
+    for (const [pair, count] of pairCounts) {
+      const [from, to] = pair.split('|');
+      if (count > (bestPairs.get(from)?.count || 0)) bestPairs.set(from, { to, count });
+    }
+    const tintMap = new Map([...bestPairs].map(([from, pair]) => [from, pair.to]));
+    mountedTintMaps[type] = tintMap;
+    return tintMap;
+  } catch (error) {
+    mountedTintMaps[type] = new Map();
+    return null;
   }
-  if (gameTime >= nextIdleEnemySpawnAt) {
-    if (spawnNextEnemy()) nextIdleEnemySpawnAt = gameTime + idleEnemySpawnInterval;
-    else nextIdleEnemySpawnAt = gameTime + 1;
+}
+function tintedMountedFrame(frame, type) {
+  const tintMap = getMountedRiderTintMap(type);
+  if (!tintMap?.size) return frame;
+  const width = frame.width || 14;
+  const height = frame.height || 20;
+  const key = `${type}:${frame.x}:${frame.y}:${width}:${height}`;
+  if (tintedFrameCache.has(key)) return tintedFrameCache.get(key);
+  const buffer = document.createElement('canvas');
+  buffer.width = width; buffer.height = height;
+  const bufferCtx = buffer.getContext('2d', { willReadFrequently: true });
+  try {
+    bufferCtx.drawImage(spriteSheet, frame.x, frame.y, width, height, 0, 0, width, height);
+    const pixels = bufferCtx.getImageData(0, 0, width, height);
+    for (let index = 0; index < pixels.data.length; index += 4) {
+      const from = `${pixels.data[index]},${pixels.data[index + 1]},${pixels.data[index + 2]}`;
+      const to = tintMap.get(from);
+      if (!to) continue;
+      const [r, g, b] = to.split(',').map(Number);
+      pixels.data[index] = r;
+      pixels.data[index + 1] = g;
+      pixels.data[index + 2] = b;
+    }
+    bufferCtx.putImageData(pixels, 0, 0);
+  } catch (error) {
+    return frame;
   }
+  const tintedFrame = { ...frame, image: buffer };
+  tintedFrameCache.set(key, tintedFrame);
+  return tintedFrame;
 }
 function drawAtlasSprite(frame, x, y, width, height, facingLeft = false) {
   if (!spriteSheet.complete || !spriteSheet.naturalWidth) return;
@@ -869,12 +1122,20 @@ function drawAtlasSprite(frame, x, y, width, height, facingLeft = false) {
     ctx.translate(x * 2, 0);
     ctx.scale(-1, 1);
   }
-  ctx.drawImage(spriteSheet, frame.x, frame.y, sourceWidth, sourceHeight,
-    x - width / 2, y - height / 2 + (frame.offsetY || 0), width, height);
+  if (frame.image) {
+    ctx.drawImage(frame.image, 0, 0, sourceWidth, sourceHeight,
+      x - width / 2, y - height / 2 + (frame.offsetY || 0), width, height);
+  } else {
+    ctx.drawImage(spriteSheet, frame.x, frame.y, sourceWidth, sourceHeight,
+      x - width / 2, y - height / 2 + (frame.offsetY || 0), width, height);
+  }
   ctx.restore();
 }
 function drawRider(rider, frames, facingLeft) {
-  const frame = frames[Math.floor(rider.animationClock / 180) % frames.length];
+  let frame = frames[Math.floor(rider.animationClock / 180) % frames.length];
+  if (rider.type === 'hunter' || rider.type === 'shadow') {
+    frame = tintedMountedFrame(frame, rider.type);
+  }
   drawAtlasSprite(frame, rider.x, rider.y, riderSpriteWidth,
     frame.drawHeight || riderSpriteHeight, facingLeft);
 }
@@ -906,15 +1167,14 @@ function drawHatchling(item) {
   drawAtlasSprite(item.riderFrame, item.x, item.y + bob, 29, 58);
 }
 function drawRescueBird(bird) {
-  const frames = bird.type === 'alternate' ? alternateEnemyDeathFlightFrames : enemyDeathFlightFrames;
+  const frames = enemyDeathFlightFrames;
   const frame = frames[Math.floor(bird.animationClock * 7) % frames.length];
   drawAtlasSprite(frame, bird.x, bird.y, 50, 48, bird.vx < 0);
 }
 function drawDeathBird(rider, death, facingLeft) {
   if (death.phase === 'walk') {
     const isEnemy = rider !== player;
-    const walkFrames = !isEnemy ? loneBirdWalkFrames
-      : rider.type === 'alternate' ? alternateEnemyDeathWalkFrames : enemyDeathWalkFrames;
+    const walkFrames = !isEnemy ? loneBirdWalkFrames : enemyDeathWalkFrames;
     const frame = walkFrames[Math.floor(death.elapsed * 6) % walkFrames.length];
     if (isEnemy) {
       drawAtlasSprite(frame, death.birdX, death.birdY + 5, 50, 48, facingLeft);
@@ -928,9 +1188,7 @@ function drawDeathBird(rider, death, facingLeft) {
     drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
     return;
   }
-  const flightFrames = rider.type === 'alternate'
-    ? alternateEnemyDeathFlightFrames : enemyDeathFlightFrames;
-  const frame = flightFrames[Math.floor(death.elapsed * 4) % flightFrames.length];
+  const frame = enemyDeathFlightFrames[Math.floor(death.elapsed * 4) % enemyDeathFlightFrames.length];
   drawAtlasSprite(frame, death.birdX, death.birdY, 50, 48, facingLeft);
 }
 function drawDeath(rider) {
@@ -977,6 +1235,33 @@ function draw() {
   if (spriteSheet.complete && spriteSheet.naturalWidth) {
     ctx.drawImage(spriteSheet, 0, 42, 238, 198, 0, 0, canvas.width, canvas.height);
   }
+  for (const index of removedPlatforms) {
+    const platform = platforms[index];
+    if (!platform) continue;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(platform.x, platform.y - 3, platform.width, platform.bottom - platform.y + 5);
+  }
+  if (waveTime < 1.5) {
+    for (let index = 0; index < portalPads.length; index++) {
+      const pad = portalPads[index];
+      const pulse = 0.4 + 0.35 * Math.sin(gameTime * 5 + index);
+      ctx.fillStyle = `rgba(185, 205, 214, ${pulse})`;
+      ctx.fillRect(pad.x - 7, pad.y - 3, 14, 4);
+    }
+  }
+  if (lavaActive) {
+    ctx.fillStyle = '#ff3b08';
+    ctx.fillRect(0, canvas.height - 18, canvas.width, 18);
+    if (currentWave >= 4) {
+      const handX = trollHandX();
+      const handY = canvas.height - Math.min(trollReach, 90);
+      ctx.fillStyle = '#a64d00';
+      ctx.fillRect(handX - 17, handY, 34, 34);
+      ctx.fillRect(handX - 29, handY - 15, 10, 24);
+      ctx.fillRect(handX - 9, handY - 22, 10, 29);
+      ctx.fillRect(handX + 11, handY - 16, 10, 24);
+    }
+  }
   const playerWalking = keys.ArrowLeft || keys.ArrowRight || Math.abs(player.vx) > 0.15;
   const playerFrames = !player.onPlatform ? playerFlightFrames
     : playerWalking ? playerWalkFrames : playerStandFrames;
@@ -992,15 +1277,39 @@ function draw() {
   for (const enemy of enemies) {
     if (enemy.death) drawDeath(enemy);
     else if (enemy.active) {
-      const walkFrames = enemy.type === 'alternate' ? alternateEnemyWalkFrames : enemyWalkFrames;
-      const flightFrames = enemy.type === 'alternate' ? alternateEnemyFlightFrames : enemyFlightFrames;
-      drawRider(enemy, enemy.onPlatform ? walkFrames : flightFrames, enemy.vx < 0);
+      drawRider(enemy, enemy.onPlatform ? enemyWalkFrames : enemyFlightFrames, enemy.vx < 0);
     }
     if (enemy.egg) drawEgg(enemy.egg);
     if (enemy.hatchling) drawHatchling(enemy.hatchling);
     if (enemy.rescueBird) drawRescueBird(enemy.rescueBird);
   }
+  for (const bird of pterodactyls) drawPterodactyl(bird);
+  ctx.save();
+  ctx.font = 'bold 20px monospace';
+  ctx.fillStyle = '#f5d938';
+  ctx.textAlign = 'left';
+  ctx.fillText(`WAVE ${currentWave}`, 18, 30);
+  if (eggWave) ctx.fillText('EGG WAVE', 18, 54);
+  ctx.restore();
   drawScore();
+}
+function drawPterodactyl(bird) {
+  if (bird.dying) {
+    const frameIndex = Math.min(pterodactylDeathFrames.length - 1,
+      Math.floor(bird.deathElapsed / 0.24));
+    ctx.save();
+    ctx.globalAlpha = clamp(1 - bird.deathElapsed / 0.72, 0, 1);
+    const frame = pterodactylDeathFrames[frameIndex];
+    drawAtlasSprite(frame, bird.x, bird.y, frame.width * 4, frame.height * 4,
+      bird.direction < 0);
+    ctx.restore();
+    return;
+  }
+  const frame = pterodactylFlightFrames[
+    Math.floor(bird.animationClock * 8) % pterodactylFlightFrames.length
+  ];
+  drawAtlasSprite(frame, bird.x, bird.y, frame.width * 4, frame.height * 4,
+    bird.direction < 0);
 }
 const simulationStep = 1 / 60;
 let previousFrameTime = 0;
@@ -1018,7 +1327,7 @@ function loop(timestamp) {
 }
 resetPlayer();
 player.spawn = { elapsed: 0 };
-spawnNextEnemy();
+startWave(1);
 canvas.focus({ preventScroll: true });
 requestAnimationFrame(loop);
 </script>
